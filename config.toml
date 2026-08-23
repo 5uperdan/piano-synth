@@ -1,9 +1,11 @@
-# Configuration for piano_control.py
-# Edit and then: sudo systemctl restart piano-control
+# Configuration for piano_control.py and midi_capture.py.
+# Paths use ~, which the applications expand, so nothing here depends on your
+# username. Edit and then restart whichever service you changed:
+#   sudo systemctl restart piano-control piano-capture
 
 [paths]
-soundfont_dir = "/home/danny/soundfonts"
-state_file = "/home/danny/.local/state/piano/state.json"
+soundfont_dir = "~/soundfonts"
+state_file = "~/.local/state/piano/state.json"
 
 [fluidsynth]
 host = "127.0.0.1"
@@ -49,10 +51,10 @@ hold_direction = "up"
 # written to disk until you hold the joystick in. See the README.
 enabled = true
 socket_path = "/run/piano/capture.sock"
-recordings_dir = "/home/danny/recordings"
+recordings_dir = "~/recordings"
 
-# How much playing a saved file contains. 60 minutes is roughly 27MB of RAM
-# at worst and produces files around 360KB.
+# How much playing a saved file contains. An hour of dense two-handed playing
+# measures around 11MB of RAM and saves to a ~390KB .mid.
 window_minutes = 60
 
 # Hard ceiling so memory exhaustion is impossible regardless of playing
@@ -66,7 +68,6 @@ retention_days = 30
 # Substring of the ALSA MIDI input port name, as shown by `aconnect -l`.
 # "Midi Through" is always skipped -- it is a virtual loopback, not your piano.
 port_match = "MIDI"
-reconnect_seconds = 5.0
 
 # How long to hold the joystick in before a save triggers. A shorter press
 # still loads the soundfont under the cursor as before.

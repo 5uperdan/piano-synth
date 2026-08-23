@@ -5,7 +5,7 @@ Wants=sound.target
 
 [Service]
 Type=simple
-User=danny
+User=$USER
 Group=audio
 SupplementaryGroups=audio
 

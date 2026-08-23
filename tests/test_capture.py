@@ -105,7 +105,7 @@ def test_concurrent_appends_do_not_corrupt_a_snapshot():
 # -- MIDI file output ------------------------------------------------------
 
 def test_empty_buffer_still_produces_a_valid_file():
-    midi_file = mc.events_to_midifile([], mido)
+    midi_file = mc.events_to_midifile([])
     assert len(midi_file.tracks) == 1
 
 
@@ -115,7 +115,7 @@ def test_events_become_messages_with_real_timing():
         (10.5, NOTE_OFF),
         (11.5, NOTE_ON),
     ]
-    track = mc.events_to_midifile(events, mido).tracks[0]
+    track = mc.events_to_midifile(events).tracks[0]
     notes = [m for m in track if not m.is_meta]
 
     assert [m.type for m in notes] == ["note_on", "note_off", "note_on"]
@@ -126,7 +126,7 @@ def test_events_become_messages_with_real_timing():
 
 
 def test_tempo_is_written_so_playback_speed_matches_performance():
-    track = mc.events_to_midifile([(0.0, NOTE_ON)], mido).tracks[0]
+    track = mc.events_to_midifile([(0.0, NOTE_ON)]).tracks[0]
     tempos = [m for m in track if m.is_meta and m.type == "set_tempo"]
     assert tempos and tempos[0].tempo == mc.TEMPO_US_PER_BEAT
 
@@ -134,7 +134,7 @@ def test_tempo_is_written_so_playback_speed_matches_performance():
 def test_pedal_is_preserved_in_the_written_file(tmp_path):
     events = [(0.0, NOTE_ON), (0.1, SUSTAIN_DOWN), (1.0, NOTE_OFF)]
     target = tmp_path / "out.mid"
-    mc.events_to_midifile(events, mido).save(str(target))
+    mc.events_to_midifile(events).save(str(target))
 
     reloaded = mido.MidiFile(str(target))
     controls = [m for m in reloaded if m.type == "control_change"]
@@ -144,7 +144,7 @@ def test_pedal_is_preserved_in_the_written_file(tmp_path):
 
 def test_undecodable_events_are_skipped_not_fatal():
     events = [(0.0, NOTE_ON), (0.1, bytes([0x90])), (0.2, NOTE_OFF)]
-    track = mc.events_to_midifile(events, mido).tracks[0]
+    track = mc.events_to_midifile(events).tracks[0]
     assert len([m for m in track if not m.is_meta]) == 2
 
 
@@ -236,7 +236,7 @@ def running_capture(tmp_path, short_socket_dir):
         }
     })
     buffer = mc.RingBuffer(config.window_seconds, config.max_events)
-    server = mc.ControlServer(config.socket_path, mc.Recorder(buffer, config, mido))
+    server = mc.ControlServer(config.socket_path, mc.Recorder(buffer, config))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:

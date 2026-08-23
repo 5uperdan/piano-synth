@@ -8,13 +8,13 @@ Wants=sound.target
 
 [Service]
 Type=simple
-User=danny
-Group=danny
+User=$USER
+Group=$USER
 SupplementaryGroups=audio
 
-WorkingDirectory=/home/danny/piano-synth
-Environment=PIANO_CONFIG=/home/danny/piano-synth/config.toml
-ExecStart=/home/danny/piano-synth/.venv/bin/python /home/danny/piano-synth/midi_capture.py
+WorkingDirectory=/home/$USER/piano-synth
+Environment=PIANO_CONFIG=/home/$USER/piano-synth/config.toml
+ExecStart=/home/$USER/piano-synth/.venv/bin/python /home/$USER/piano-synth/midi_capture.py
 
 # Creates /run/piano owned by this user and removes it (and the socket) on
 # stop, so a stale socket can never be left behind.

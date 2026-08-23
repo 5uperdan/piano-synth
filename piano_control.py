@@ -243,12 +243,8 @@ class CaptureClient:
             sock.settimeout(self.timeout)
             sock.connect(str(self.socket_path))
             sock.sendall(b"save\n")
-            reply = b""
-            while not reply.endswith(b"\n") and len(reply) < 1024:
-                chunk = sock.recv(256)
-                if not chunk:
-                    break
-                reply += chunk
+            with sock.makefile("rb") as stream:
+                reply = stream.readline(1024)
         text = reply.decode("utf-8", errors="replace").strip()
         if not text.startswith("OK "):
             raise RuntimeError(text or "no reply from capture service")
@@ -409,10 +405,10 @@ class App:
         self.awake = False
         self.last_input = 0.0
         self._hold_started: float | None = None
-        # The middle button acts on release, so that holding it can mean
-        # something different from tapping it. These track a press in flight.
+        # The middle button acts on release, so holding it can mean something
+        # different from tapping it. Set while a press is in flight; cleared by
+        # whichever action claims it.
         self._middle_pressed_at: float | None = None
-        self._middle_consumed = False
 
     # -- soundfont inventory ------------------------------------------------
 
@@ -528,7 +524,6 @@ class App:
 
     def move_cursor(self, direction: str) -> None:
         count = len(self.fonts)
-        x, y = index_to_xy(self.cursor)
         if direction == "left":
             candidate = self.cursor - 1
         elif direction == "right":
@@ -583,8 +578,6 @@ class App:
         else:
             LOG.info("Saved recording %s", name)
             self.matrix.full_flash(self.config.colour_success, 2, 0.1, 0.08)
-        finally:
-            self.matrix.clear()
 
     def handle_press(self, direction: str) -> None:
         self.last_input = time.monotonic()
@@ -651,7 +644,6 @@ class App:
                         # depends on how long the button is held, so it is
                         # decided on release (or by the timer below).
                         self._middle_pressed_at = now
-                        self._middle_consumed = False
                         self.last_input = now
                     else:
                         self.handle_press(event.direction)
@@ -660,25 +652,22 @@ class App:
                         self.handle_hold(event.direction, time.monotonic())
                 elif event.action == "released":
                     self._hold_started = None
-                    if event.direction == "middle":
-                        if not self._middle_consumed:
-                            self.handle_middle_tap()
-                            # Loading blocks; discard input queued meanwhile.
-                            self.sense.stick.get_events()
+                    if event.direction == "middle" and self._middle_pressed_at is not None:
+                        # Still pending, so the hold never fired: it was a tap.
                         self._middle_pressed_at = None
-                        self._middle_consumed = False
+                        self.handle_middle_tap()
+                        # Loading blocks; discard input queued meanwhile.
+                        self.sense.stick.get_events()
 
             # Timed here rather than driven by "held" events, so the gesture
             # does not depend on the kernel's key-repeat rate.
             if (
                 self._middle_pressed_at is not None
-                and not self._middle_consumed
                 and now - self._middle_pressed_at >= self.config.capture_hold_seconds
             ):
-                self._middle_consumed = True
+                self._middle_pressed_at = None
                 self.save_recording()
                 self.sense.stick.get_events()
-                self._middle_pressed_at = None
 
             if self.awake and now - self.last_input > self.config.idle_timeout:
                 self.awake = False

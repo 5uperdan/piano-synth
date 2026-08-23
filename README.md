@@ -74,54 +74,68 @@ boot.
 
 # Setup
 
-Assumes a Raspberry Pi 4 with Raspberry Pi OS **Lite 64-bit** (Bookworm or
-later), SSH working, and the user `danny`. Substitute your own username
-throughout if different — it appears in both service files and in
-`config.toml`.
+Twelve steps, start to finish. Allow about an hour, most of it downloads.
+
+**Before you start you need:** a Raspberry Pi 4 running Raspberry Pi OS
+**Lite 64-bit** (Bookworm or later) with SSH working, and a shell on it.
+
+Every command below is run **on the Pi**, from an SSH session, and uses
+`$USER` so it works whatever your username is. Check yours resolves:
+
+```bash
+echo $USER
+```
+
+---
 
 ## 1. Hardware
 
-- Raspberry Pi 4. **2GB minimum, 4GB recommended** — FluidSynth loads the
-  entire soundfont into RAM, so a 600MB soundfont needs 600MB resident. On 2GB,
-  set `load_before_unload = false` in `config.toml` (see step 9). The recording
-  buffer adds at most ~27MB on top, which is irrelevant on any of these.
-- Sense HAT.
-- USB sound card (e.g. Sound Blaster Play!). The Pi's own 3.5mm output is
-  PWM-based and noticeably noisy — don't use it for this.
-- USB-MIDI interface, connected to the piano's **MIDI OUT** socket only. Do
-  not connect the return leg; it does nothing here and can cause MIDI feedback.
+| Part | Notes |
+|---|---|
+| Raspberry Pi 4 | 2GB minimum, 4GB+ recommended. FluidSynth holds the whole soundfont in RAM, so a 600MB font needs 600MB resident. Recording adds ~11MB on top for a busy hour. |
+| Sense HAT | The control surface: joystick to browse, LED matrix to display. |
+| USB sound card | e.g. Sound Blaster Play!. The Pi's own 3.5mm output is PWM-based and noticeably noisy — don't use it. |
+| USB-MIDI interface | Connected to the piano's **MIDI OUT** only. |
+| GPIO stacking header | Optional but recommended — see below. |
 
-**Thermal note:** the Sense HAT sits flat over the SoC and blocks airflow, and
+**Only connect the piano's MIDI OUT.** The return leg does nothing here (the
+whole point is to bypass the piano's own sound engine) and it can cause MIDI
+feedback — doubled or stuck notes.
+
+**Cable labelling gotcha:** budget USB-MIDI cables label their DIN plugs by the
+socket they belong in, but the convention is applied inconsistently. If no note
+data appears in step 5, swap the plugs before assuming anything is broken.
+
+**Thermal note:** the Sense HAT sits flat over the SoC, blocks airflow, and
 prevents fitting most heatsink cases. A **GPIO stacking header** (a few pounds)
-lifts it 15-20mm clear, restores airflow, and leaves room for a low-profile
-heatsink underneath. Worth doing. `low_light = true` in the config also keeps
-the LED matrix from adding its own heat.
+lifts it 15–20mm clear, restores airflow, and leaves room for a low-profile
+heatsink underneath. `low_light = true` in the config also keeps the LED matrix
+from adding its own heat.
+
+---
 
 ## 2. Boot configuration
 
-Edit `/boot/firmware/config.txt`:
+Enable I2C for the Sense HAT and disable every audio device except the USB
+card, so ALSA card numbers can never shuffle between boots.
 
 ```bash
 sudo nano /boot/firmware/config.txt
 ```
 
-Change the audio line and enable I2C for the Sense HAT:
+Set these three lines:
 
 ```ini
-# Sense HAT needs I2C
 dtparam=i2c_arm=on
-
-# Disable onboard audio so the USB card is unambiguous
 dtparam=audio=off
-
-# Suppress HDMI audio devices too
 dtoverlay=vc4-kms-v3d,noaudio
 ```
 
-Disabling onboard and HDMI audio means the USB card is the only sound device,
-which removes any chance of ALSA card numbers shuffling between boots.
+```bash
+sudo reboot
+```
 
-Reboot: `sudo reboot`
+---
 
 ## 3. Install packages
 
@@ -132,23 +146,24 @@ sudo apt install -y fluidsynth alsa-utils python3-sense-hat python3-rtimulib \
                     cpufrequtils rfkill git curl
 ```
 
-`python3-sense-hat` and `python3-rtimulib` must come from apt. RTIMULib is a
-C++ library with no working PyPI package — this is the dependency uv cannot
-manage, which is why step 8 uses `--system-site-packages`.
+Three of these must come from apt rather than pip: `python3-rtimulib` (which
+`python3-sense-hat` needs) and `python3-rtmidi` are C/C++ libraries that either
+have no working PyPI package or want compiling on ARM. This is why step 8
+creates the virtualenv with `--system-site-packages`.
 
-`python3-rtmidi` is the same story: a C++ binding that wants compiling, so apt
-is far less trouble than pip on ARM. `python3-mido` sits on top of it and also
-writes the Standard MIDI Files. Both are only needed for recording — if you
-set `enabled = false` under `[capture]` you can skip them.
+`python3-mido` and `python3-rtmidi` are only needed for recording. Skip them if
+you set `enabled = false` under `[capture]` in step 9.
 
-Confirm the Sense HAT is alive:
+**Check:** the Sense HAT is alive.
 
 ```bash
 python3 -c "from sense_hat import SenseHat; s=SenseHat(); s.show_letter('P'); import time; time.sleep(1); s.clear()"
 ```
 
-A letter P should appear for a second. If you get an I2C error, check step 2
-and that the HAT is seated properly.
+A letter P should appear for a second. An I2C error means step 2 didn't take,
+or the HAT isn't seated properly.
+
+---
 
 ## 4. Identify the sound card
 
@@ -158,53 +173,57 @@ With the USB sound card plugged in:
 aplay -L | grep -A1 CARD=
 ```
 
-Look for the entry naming your device, something like:
+Look for your device:
 
 ```
 hw:CARD=Device,DEV=0
     USB Audio Device, USB Audio
-    Direct hardware device without any conversion
 ```
 
-You want the **`hw:CARD=...`** form, not `plughw:` or `default:` — `hw:` is
-direct hardware access with no resampling layer, which is what you want for
-low latency. Note the exact string; it goes into the service file in step 11.
+**Write down the exact `hw:CARD=...` string** — it goes into the service file
+in step 11. Use the `hw:` form, not `plughw:` or `default:`: `hw:` is direct
+hardware access with no resampling layer in the way.
 
-Test it makes noise:
+**Check:** it makes noise.
 
 ```bash
 speaker-test -D hw:CARD=Device,DEV=0 -c 2 -t sine -l 1
 ```
 
-## 5. Confirm MIDI arrives
+---
 
-Plug in the USB-MIDI interface and check the Pi sees it:
+## 5. Confirm MIDI arrives
 
 ```bash
 aconnect -l
 ```
 
-You should see a client for your MIDI interface. Then watch for note data:
+You should see a client for your MIDI interface. Note its name — you may need
+it for `port_match` in step 9.
+
+**Check:** note data actually flows.
 
 ```bash
 aseqdump -p "USB MIDI Interface"
 ```
 
-Play keys on the piano. You should see note-on and note-off events, alongside
-a steady stream of clock and active-sensing messages — that noise is normal and
-FluidSynth ignores it.
+Play some keys. You should see note-on and note-off events, alongside a steady
+stream of clock and active-sensing messages — that noise is normal, and both
+FluidSynth and the recorder ignore it. Ctrl+C to stop.
 
-**If nothing appears,** swap the two DIN plugs at the piano end. These cables
-are labelled inconsistently and getting it the wrong way round is the single
-most common cause of silence. Ctrl+C to stop.
+**Nothing appears?** Swap the two DIN plugs at the piano end. That is by far
+the most common cause of silence.
+
+---
 
 ## 6. Realtime privileges
 
-Without these, the audio thread gets preempted by other processes and you get
-crackles and dropouts under load.
+Without these the audio thread gets preempted by other processes and you get
+crackles and dropouts under load. This is the single biggest factor in whether
+the whole thing sounds clean.
 
 ```bash
-sudo usermod -a -G audio danny
+sudo usermod -a -G audio $USER
 sudo tee /etc/security/limits.d/audio.conf >/dev/null <<'EOF'
 @audio - rtprio 90
 @audio - nice -10
@@ -212,21 +231,27 @@ sudo tee /etc/security/limits.d/audio.conf >/dev/null <<'EOF'
 EOF
 ```
 
-Log out and back in (group membership only attaches at session start), then
-verify:
+**Log out and back in** — group membership only attaches at session start.
+
+**Check:**
 
 ```bash
 groups          # must include 'audio'
 ulimit -r       # must print 90, not 0
 ```
 
-Both service files also set `LimitRTPRIO` and `LimitMEMLOCK` directly, because
-systemd services do not read `limits.conf`. Belt and braces — you need both.
+If `ulimit -r` prints 0, nothing else in this guide will make it sound good.
+Fix this before continuing.
+
+The service files also set `LimitRTPRIO` and `LimitMEMLOCK` directly, because
+systemd services do not read `limits.conf`. You need both.
+
+---
 
 ## 7. CPU frequency and swap
 
-The Pi scales its clock down when idle and takes a moment to ramp up, which
-shows up as dropouts on the first notes after a pause.
+The Pi clocks down when idle and takes a moment to ramp up, which shows up as
+dropouts on the first notes after a pause.
 
 ```bash
 sudo tee /etc/default/cpufrequtils >/dev/null <<'EOF'
@@ -235,136 +260,188 @@ EOF
 sudo systemctl enable --now cpufrequtils
 ```
 
-Verify: `cpufreq-info | grep "current policy"` should show the performance
-governor. This raises idle power draw and temperature slightly — acceptable
-for an always-on appliance, and the reason the stacking header in step 1 is
-worth having.
+**Check:** `cpufreq-info | grep "current policy"` shows the performance
+governor. This raises idle power and temperature slightly — acceptable for an
+always-on appliance, and the reason the stacking header in step 1 is worth
+having.
 
-### Check what kind of swap you have
+### Then check what kind of swap you have
 
 ```bash
 swapon --show
 ```
 
-This matters because swapping is one of the few things that can stall audio
-badly enough to hear. FluidSynth holds the whole soundfont resident, and
-faulting a page back from slow storage mid-note is exactly the kind of pause
-that causes a dropout.
+Swapping is one of the few things that can stall audio badly enough to hear:
+FluidSynth holds the whole soundfont resident, and faulting a page back from
+slow storage mid-note causes a dropout.
 
-- **`/dev/zram0`, type `partition`** — the Raspberry Pi OS default, and
-  perfectly fine. zram is *compressed swap held in RAM*: no SD card involved,
-  no wear, no I/O stall. The worst it can cost is a little CPU to decompress a
-  page, and on a Pi with headroom it will never activate at all. **Leave it
-  alone.**
-- **`/var/swap`, type `file`** — a real file on the SD card, and worth removing
-  on an audio box:
+- **`/dev/zram0`, type `partition`** — the Raspberry Pi OS default, and fine.
+  zram is *compressed swap held in RAM*: no SD card involved, no wear, no I/O
+  stall. On a Pi with headroom it will never activate at all. **Leave it.**
+- **`/var/swap`, type `file`** — a real file on the SD card. Worth removing:
 
   ```bash
   sudo dphys-swapfile swapoff && sudo systemctl disable --now dphys-swapfile
   ```
 
-Either way, `fluidsynth.service` and `piano-capture.service` both set
-`MemorySwapMax=0`, which is a cgroup-level guarantee that those two processes
-stay resident regardless of what swap exists system-wide. Free insurance
-rather than something load-bearing.
+Either way `fluidsynth.service` and `piano-capture.service` both set
+`MemorySwapMax=0`, a cgroup-level guarantee that those two stay resident
+whatever swap exists system-wide.
+
+---
 
 ## 8. Install the application
 
 ```bash
-# Copy this directory to /home/danny/piano-synth, then:
-cd /home/danny/piano-synth
+git clone https://github.com/5uperdan/piano-synth.git /home/$USER/piano-synth
+cd /home/$USER/piano-synth
+```
 
-# Install uv if you don't have it
+Install uv if you don't have it:
+
+```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 source ~/.bashrc
+```
 
-# System site packages so the venv can see apt's python3-sense-hat
+Create the virtualenv. **`--system-site-packages` is not optional** — it is how
+the venv sees the apt-installed `sense_hat` and `rtmidi`:
+
+```bash
 uv venv --system-site-packages
 uv sync
 ```
 
-Check the venv can reach the Sense HAT library:
+**Check:** the venv can reach the system libraries.
 
 ```bash
-.venv/bin/python -c "import sense_hat; print('sense_hat ok')"
+.venv/bin/python -c "import sense_hat, rtmidi, mido; print('all imports ok')"
 ```
 
 If that fails, the venv was created without `--system-site-packages`. Delete
 `.venv` and redo it.
 
+---
+
 ## 9. Configure
 
 ```bash
-mkdir -p /home/danny/soundfonts
+mkdir -p ~/soundfonts ~/recordings
 nano config.toml
 ```
 
-Set `soundfont_dir` if you used a different path, and check
-`load_before_unload`. This setting is **purely about ordering** — the old font
-is unloaded either way. What changes is when:
+Paths in `config.toml` use `~`, which the application expands, so there is
+nothing to substitute here regardless of your username.
 
-- **4GB or 8GB Pi:** leave `true`. The new font loads and the channels are
-  pointed at it *before* the old one is freed, so there is never a moment where
-  pressing a key gives you silence. Costs having both resident briefly.
-- **2GB Pi:** set `false`. Halves peak RAM, at the cost of a gap of several
-  seconds during a switch where the keyboard makes no sound at all. With a
-  600MB font on 2GB, `true` risks swapping, which will destroy audio
-  performance.
+**`load_before_unload`** is purely about *ordering* — the old font is unloaded
+either way. What changes is when:
 
-Check with `free -h` if you are unsure which you have.
+- **4GB or 8GB Pi:** leave `true`. The new font loads and channels are pointed
+  at it *before* the old one is freed, so there is never a moment where a key
+  gives you silence. Costs having both resident briefly.
+- **2GB Pi:** set `false`. Halves peak RAM, at the cost of several seconds of
+  total silence during a switch.
 
-If the Sense HAT is mounted rotated relative to where you sit, set `rotation`
-(LED orientation) and `joystick_rotation` (direction remapping) to match.
+Check which you have with `free -h`.
 
-The `[capture]` section controls recording. The defaults are sensible; the two
-worth a thought are `window_minutes` (how much playing a saved file contains)
-and `retention_days` (recordings older than this are deleted automatically
-after each save). Set `retention_days = 0` to never delete anything, and
-`enabled = false` to turn recording off entirely. See
-[MIDI recording](#midi-recording) below.
+**`[capture]`** controls recording. The defaults are sensible; the two worth a
+thought are `window_minutes` (how much playing a saved file contains) and
+`retention_days` (recordings older than this are deleted automatically after
+each save — set `0` to keep everything forever). Set `enabled = false` to turn
+recording off entirely. If step 5 showed a port name unlike "USB MIDI
+Interface", set `port_match` to a distinctive part of it.
+
+**Sense HAT mounted rotated?** Set `rotation` (LED orientation) and
+`joystick_rotation` (direction remapping) to match how you sit.
+
+---
 
 ## 10. Add soundfonts
 
 ```bash
-cd /home/danny/soundfonts
-curl -L -o Yamaha-C5-Salamander.sf2 'URL_HERE'
+cd ~/soundfonts
+curl -L -o Yamaha-C5.sf2 'URL_HERE'
 ```
 
-Only `.sf2` and `.sf3` are picked up. Filenames become the scrolling display
-names, so keep them short and descriptive — `Yamaha-C5` reads better on an
-8x8 grid than `Yamaha-C5-Salamander-JNv4.0-final`. The font covers A-Z, 0-9
-and common punctuation; anything else renders as `?`.
+Only `.sf2` and `.sf3` are picked up, and at most 64 (one per LED). Filenames
+become the scrolling display names, so keep them short — `Yamaha-C5` reads far
+better on an 8x8 grid than `Yamaha-C5-Salamander-JNv4.0-final`. The font covers
+A–Z, 0–9 and common punctuation; anything else renders as `?`.
 
-The directory is scanned once at startup. After adding files:
+The directory is scanned once at startup, so after adding files later:
+`sudo systemctl restart piano-control`.
 
-```bash
-sudo systemctl restart piano-control
-```
+---
 
 ## 11. Install the services
 
-Edit `systemd/fluidsynth.service` and replace `hw:CARD=Device,DEV=0` with the
-exact string from step 4. Then:
+First put your sound card string from step 4 into the FluidSynth unit:
 
 ```bash
-sudo cp systemd/*.service /etc/systemd/system/
+cd /home/$USER/piano-synth
+nano systemd/fluidsynth.service
+```
+
+Replace `hw:CARD=Device,DEV=0` on the `audio.alsa.device` line.
+
+The unit files carry a literal `$USER` placeholder, because systemd does no
+variable expansion of its own. Substitute it as you install them:
+
+```bash
+for unit in systemd/*.service; do
+  sed "s|[$]USER|$USER|g" "$unit" \
+    | sudo tee /etc/systemd/system/"$(basename "$unit")" >/dev/null
+done
+```
+
+**Check the substitution worked** before starting anything:
+
+```bash
+grep -h 'User=\|ExecStart=' /etc/systemd/system/piano-*.service
+```
+
+Every path should name your actual home directory, with no `$USER` left.
+
+Then start them, audio engine first:
+
+```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now fluidsynth.service
 sudo systemctl enable --now piano-capture.service
 sudo systemctl enable --now piano-control.service
 ```
 
-Check all three:
+---
+
+## 12. Verify
 
 ```bash
-systemctl status fluidsynth.service piano-capture.service piano-control.service
+systemctl status fluidsynth piano-capture piano-control
+```
+
+All three should be `active (running)`. Then watch the control app start up:
+
+```bash
 journalctl -u piano-control -f
 ```
 
 You should see the soundfont count, a connection message, and a load
 confirmation. The matrix does a brief green sweep when ready, then blanks.
 
-Reboot to confirm it comes up clean, then play.
+**Play a key.** You should hear your soundfont through the USB sound card.
+
+**Nudge the joystick.** The matrix wakes, lights the loaded font, and scrolls
+its name.
+
+**Hold the joystick in for 1.5s.** The matrix flashes amber then green, and a
+file appears:
+
+```bash
+ls -l ~/recordings
+```
+
+Finally, `sudo reboot` and confirm it all comes back on its own. Nothing to log
+into from here — power on and play.
 
 ---
 
@@ -378,7 +455,7 @@ flashes amber to confirm the hold registered, then green when the file is
 written (red if something went wrong). It works with the display asleep and
 does not wake it, because you will be mid-playing and not looking at the HAT.
 
-Files land in `/home/danny/recordings`, named by the moment you saved:
+Files land in `~/recordings`, named by the moment you saved:
 
 ```
 2026-08-23_14-32-07.mid
@@ -416,7 +493,7 @@ If you want to keep something permanently, move it out of that directory.
 ### Getting recordings off the Pi
 
 ```bash
-scp danny@pi4Bsynth:recordings/\*.mid ~/Music/piano/
+scp $USER@pi4Bsynth:recordings/\*.mid ~/Music/piano/
 ```
 
 ### Does it affect audio latency?
@@ -550,8 +627,8 @@ To enable it, set `toggle_enabled = true` in `config.toml` and grant the app
 permission to run `rfkill`:
 
 ```bash
-sudo tee /etc/sudoers.d/piano-wifi >/dev/null <<'EOF'
-danny ALL=(root) NOPASSWD: /usr/sbin/rfkill block wifi, /usr/sbin/rfkill unblock wifi
+sudo tee /etc/sudoers.d/piano-wifi >/dev/null <<EOF
+$USER ALL=(root) NOPASSWD: /usr/sbin/rfkill block wifi, /usr/sbin/rfkill unblock wifi
 EOF
 sudo chmod 440 /etc/sudoers.d/piano-wifi
 ```
@@ -626,7 +703,7 @@ isn't set to 0.
 **New soundfonts don't appear.**
 The directory is only scanned at startup: `sudo systemctl restart
 piano-control`. Also check the extension is `.sf2` or `.sf3` and the file is
-readable by `danny`.
+readable by `$USER`.
 
 ## Useful commands
 
