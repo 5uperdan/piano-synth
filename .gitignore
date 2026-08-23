@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+uv.lock
+
+# Runtime data
+soundfonts/*
+!soundfonts/.gitkeep
+*.sf2
+*.sf3
+state.json
+
+# Editors
+.vscode/
+.idea/
+*.swp

@@ -1,0 +1,42 @@
+[Unit]
+Description=FluidSynth soundfont engine (headless piano module)
+After=sound.target network.target
+Wants=sound.target
+
+[Service]
+Type=simple
+User=danny
+Group=audio
+SupplementaryGroups=audio
+
+# systemd services do not read /etc/security/limits.conf, so realtime
+# privileges must be granted here as well.
+LimitRTPRIO=95
+LimitMEMLOCK=infinity
+Nice=-10
+IOSchedulingClass=realtime
+IOSchedulingPriority=2
+
+# NOTE: replace hw:CARD=Device,DEV=0 with the name `aplay -L` reports for the
+# Sound Blaster on your Pi. See README step 4.
+ExecStart=/usr/bin/fluidsynth -is \
+  -a alsa \
+  -o audio.alsa.device=hw:CARD=Device,DEV=0 \
+  -o audio.period-size=128 \
+  -o audio.periods=2 \
+  -o audio.realtime-prio=90 \
+  -o synth.sample-rate=48000 \
+  -o synth.polyphony=256 \
+  -o synth.cpu-cores=3 \
+  -m alsa_seq \
+  -o midi.autoconnect=1 \
+  -o shell.port=9800 \
+  -g 2.0 \
+  -C 0 \
+  -R 1
+
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

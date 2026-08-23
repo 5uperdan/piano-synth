@@ -1,0 +1,18 @@
+[project]
+name = "piano-control"
+version = "1.0.0"
+description = "Sense HAT control surface for a headless FluidSynth soundfont player"
+requires-python = ">=3.11"
+
+# Deliberately empty.
+#
+# The only third-party import is sense_hat, which depends on RTIMULib -- a C++
+# library that is packaged for apt but not for PyPI. Installing it with pip or
+# uv does not work reliably. The venv is therefore created with
+# --system-site-packages so it can see the apt-installed python3-sense-hat,
+# and everything else this app uses is in the standard library.
+dependencies = []
+
+[tool.uv]
+# Never try to manage sense_hat; it comes from the system.
+package = false

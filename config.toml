@@ -1,0 +1,45 @@
+# Configuration for piano_control.py
+# Edit and then: sudo systemctl restart piano-control
+
+[paths]
+soundfont_dir = "/home/danny/soundfonts"
+state_file = "/home/danny/.local/state/piano/state.json"
+
+[fluidsynth]
+host = "127.0.0.1"
+port = 9800
+connect_retries = 60          # 60 x connect_delay = how long to wait at boot
+connect_delay = 1.0
+load_timeout = 180.0          # a 600MB soundfont off an SD card is slow
+# true  = load the new font before unloading the old one (fast switch, needs
+#         RAM for both at once -- fine on a 4GB Pi, risky on 2GB)
+# false = unload first, then load (slower switch, half the peak RAM)
+load_before_unload = true
+
+[display]
+rotation = 0                  # LED matrix rotation: 0, 90, 180, 270
+joystick_rotation = 0         # set to match `rotation` if directions feel wrong
+low_light = true              # dimmer, cooler, and less distracting
+idle_timeout = 6.0            # seconds of no input before the display sleeps
+highlight_seconds = 0.5       # how long the position blink lasts
+scroll_step_seconds = 0.06    # lower = faster scrolling
+show_loaded_marker = true     # dimly mark the loaded font while browsing
+show_ready_animation = true   # brief sweep once the startup font is loaded
+
+[colours]
+cursor = [0, 120, 255]
+loaded = [0, 70, 0]
+text = [110, 110, 110]
+success = [0, 150, 0]
+error = [150, 0, 0]
+busy = [140, 70, 0]
+wifi_on = [0, 60, 160]
+wifi_off = [90, 40, 0]
+
+[wifi]
+# Off by default. See the README before enabling: FluidSynth is light enough
+# that this probably buys you nothing, and disabling WiFi ends your SSH
+# session. WiFi is always re-enabled at startup, so a reboot recovers.
+toggle_enabled = false
+hold_seconds = 2.0
+hold_direction = "up"

@@ -1,0 +1,20 @@
+[Unit]
+Description=Sense HAT control surface for FluidSynth
+After=fluidsynth.service
+Requires=fluidsynth.service
+
+[Service]
+Type=simple
+User=danny
+Group=danny
+SupplementaryGroups=i2c gpio input spi
+
+WorkingDirectory=/home/danny/piano-synth
+Environment=PIANO_CONFIG=/home/danny/piano-synth/config.toml
+ExecStart=/home/danny/piano-synth/.venv/bin/python /home/danny/piano-synth/piano_control.py
+
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
