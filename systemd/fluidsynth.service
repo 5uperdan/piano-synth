@@ -17,6 +17,11 @@ Nice=-10
 IOSchedulingClass=realtime
 IOSchedulingPriority=2
 
+# The soundfont is held resident in RAM. Never let any of it be swapped out,
+# even under memory pressure -- faulting a page back mid-note is exactly the
+# kind of stall that causes an audible dropout.
+MemorySwapMax=0
+
 # NOTE: replace hw:CARD=Device,DEV=0 with the name `aplay -L` reports for the
 # Sound Blaster on your Pi. See README step 4.
 ExecStart=/usr/bin/fluidsynth -is \

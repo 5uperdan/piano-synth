@@ -95,6 +95,13 @@ class Config:
         self.wifi_hold_seconds = float(wifi.get("hold_seconds", 2.0))
         self.wifi_hold_direction = wifi.get("hold_direction", "up")
 
+        capture = data.get("capture", {})
+        self.capture_enabled = bool(capture.get("enabled", True))
+        self.capture_socket = Path(
+            capture.get("socket_path", "/run/piano/capture.sock")
+        )
+        self.capture_hold_seconds = float(capture.get("hold_seconds", 1.5))
+
 
 def load_config(path: Path) -> Config:
     if path.exists():
@@ -215,6 +222,40 @@ class FluidClient:
 
 
 # --------------------------------------------------------------------------
+# Capture client
+# --------------------------------------------------------------------------
+
+class CaptureClient:
+    """Asks midi_capture.py to dump its ring buffer to a file.
+
+    A short-lived connection per request, so neither service cares whether the
+    other is running at any given moment.  The recording itself lives in the
+    capture process; this only ever sends the word "save".
+    """
+
+    def __init__(self, socket_path: Path, timeout: float = 30.0):
+        self.socket_path = socket_path
+        self.timeout = timeout
+
+    def save(self) -> str:
+        """Returns the saved filename, or raises OSError/FluidError-alikes."""
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(self.timeout)
+            sock.connect(str(self.socket_path))
+            sock.sendall(b"save\n")
+            reply = b""
+            while not reply.endswith(b"\n") and len(reply) < 1024:
+                chunk = sock.recv(256)
+                if not chunk:
+                    break
+                reply += chunk
+        text = reply.decode("utf-8", errors="replace").strip()
+        if not text.startswith("OK "):
+            raise RuntimeError(text or "no reply from capture service")
+        return text[3:]
+
+
+# --------------------------------------------------------------------------
 # Display
 # --------------------------------------------------------------------------
 
@@ -247,6 +288,15 @@ class Matrix:
     def flash(self, index: int, colour, times: int, on: float, off: float) -> None:
         for _ in range(times):
             self.show_marks({index: colour})
+            time.sleep(on)
+            self.clear()
+            time.sleep(off)
+
+    def full_flash(self, colour, times: int, on: float, off: float) -> None:
+        """Light the whole matrix. Used for events that are not about a
+        particular grid position, so there is nothing sensible to point at."""
+        for _ in range(times):
+            self.sense.set_pixels([colour] * MATRIX_PIXELS)
             time.sleep(on)
             self.clear()
             time.sleep(off)
@@ -346,10 +396,11 @@ def set_wifi(blocked: bool) -> bool:
 # --------------------------------------------------------------------------
 
 class App:
-    def __init__(self, config: Config, sense, fluid: FluidClient):
+    def __init__(self, config: Config, sense, fluid: FluidClient, capture=None):
         self.config = config
         self.sense = sense
         self.fluid = fluid
+        self.capture = capture
         self.matrix = Matrix(sense, config)
 
         self.fonts: list[Path] = []
@@ -358,6 +409,10 @@ class App:
         self.awake = False
         self.last_input = 0.0
         self._hold_started: float | None = None
+        # The middle button acts on release, so that holding it can mean
+        # something different from tapping it. These track a press in flight.
+        self._middle_pressed_at: float | None = None
+        self._middle_consumed = False
 
     # -- soundfont inventory ------------------------------------------------
 
@@ -487,21 +542,52 @@ class App:
         if 0 <= candidate < count:
             self.cursor = candidate
 
-    def handle_press(self, direction: str) -> None:
+    def handle_middle_tap(self) -> None:
+        """A short press: load whatever the cursor is on, exactly as before."""
         self.last_input = time.monotonic()
 
-        if direction == "middle":
-            if self.awake and self.cursor != self.loaded_index:
-                self.load_index(self.cursor, announce=True)
-            elif self.awake:
-                # Already loaded; acknowledge without reloading.
-                self.matrix.cancel()
-                self.matrix.flash(self.cursor, self.config.colour_loaded, 2, 0.08, 0.08)
-                self.matrix.clear()
-            else:
-                self.awake = True
-                self.announce_cursor()
+        if self.awake and self.cursor != self.loaded_index:
+            self.load_index(self.cursor, announce=True)
+        elif self.awake:
+            # Already loaded; acknowledge without reloading.
+            self.matrix.cancel()
+            self.matrix.flash(self.cursor, self.config.colour_loaded, 2, 0.08, 0.08)
+            self.matrix.clear()
+        else:
+            self.awake = True
+            self.announce_cursor()
+
+    def save_recording(self) -> None:
+        """A long press: dump the capture service's ring buffer to a file.
+
+        Deliberately works whether or not the display is awake -- you will be
+        mid-playing and not looking at the HAT when you reach for this. It also
+        does not wake the display, so the matrix goes straight back to blank.
+        """
+        self.last_input = time.monotonic()
+        self.matrix.cancel()
+
+        if self.capture is None:
+            LOG.warning("Save requested but capture is disabled in config")
+            self.matrix.full_flash(self.config.colour_error, 2, 0.12, 0.08)
             return
+
+        # Acknowledge the hold immediately, so you know it registered without
+        # having to wait for the write to finish.
+        self.matrix.full_flash(self.config.colour_busy, 1, 0.15, 0.05)
+        try:
+            name = self.capture.save()
+        except (OSError, RuntimeError) as exc:
+            LOG.error("Save failed: %s", exc)
+            self.matrix.full_flash(self.config.colour_error, 2, 0.15, 0.1)
+        else:
+            LOG.info("Saved recording %s", name)
+            self.matrix.full_flash(self.config.colour_success, 2, 0.1, 0.08)
+        finally:
+            self.matrix.clear()
+
+    def handle_press(self, direction: str) -> None:
+        self.last_input = time.monotonic()
 
         if not self.awake:
             self.awake = True
@@ -560,14 +646,39 @@ class App:
             for event in self.sense.stick.get_events():
                 if event.action == "pressed":
                     self._hold_started = None
-                    self.handle_press(event.direction)
-                    # Loading blocks; discard input that queued up meanwhile.
                     if event.direction == "middle":
-                        self.sense.stick.get_events()
+                        # Nothing happens yet. Which action this becomes
+                        # depends on how long the button is held, so it is
+                        # decided on release (or by the timer below).
+                        self._middle_pressed_at = now
+                        self._middle_consumed = False
+                        self.last_input = now
+                    else:
+                        self.handle_press(event.direction)
                 elif event.action == "held":
-                    self.handle_hold(event.direction, time.monotonic())
+                    if event.direction != "middle":
+                        self.handle_hold(event.direction, time.monotonic())
                 elif event.action == "released":
                     self._hold_started = None
+                    if event.direction == "middle":
+                        if not self._middle_consumed:
+                            self.handle_middle_tap()
+                            # Loading blocks; discard input queued meanwhile.
+                            self.sense.stick.get_events()
+                        self._middle_pressed_at = None
+                        self._middle_consumed = False
+
+            # Timed here rather than driven by "held" events, so the gesture
+            # does not depend on the kernel's key-repeat rate.
+            if (
+                self._middle_pressed_at is not None
+                and not self._middle_consumed
+                and now - self._middle_pressed_at >= self.config.capture_hold_seconds
+            ):
+                self._middle_consumed = True
+                self.save_recording()
+                self.sense.stick.get_events()
+                self._middle_pressed_at = None
 
             if self.awake and now - self.last_input > self.config.idle_timeout:
                 self.awake = False
@@ -609,7 +720,11 @@ def main() -> int:
         LOG.error("%s", exc)
         return 1
 
-    app = App(config, sense, fluid)
+    capture = CaptureClient(config.capture_socket) if config.capture_enabled else None
+    if capture is None:
+        LOG.info("MIDI capture disabled; hold-to-save will do nothing")
+
+    app = App(config, sense, fluid, capture)
     try:
         app.run()
     except KeyboardInterrupt:

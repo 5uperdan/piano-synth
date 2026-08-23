@@ -1,0 +1,36 @@
+[Unit]
+Description=Rolling MIDI capture for the piano module
+After=sound.target
+Wants=sound.target
+# Deliberately no Requires=fluidsynth.service. Capture subscribes to the MIDI
+# port in parallel with FluidSynth rather than through it, so it neither needs
+# the synth to be running nor affects it when it is.
+
+[Service]
+Type=simple
+User=danny
+Group=danny
+SupplementaryGroups=audio
+
+WorkingDirectory=/home/danny/piano-synth
+Environment=PIANO_CONFIG=/home/danny/piano-synth/config.toml
+ExecStart=/home/danny/piano-synth/.venv/bin/python /home/danny/piano-synth/midi_capture.py
+
+# Creates /run/piano owned by this user and removes it (and the socket) on
+# stop, so a stale socket can never be left behind.
+RuntimeDirectory=piano
+RuntimeDirectoryMode=0750
+
+# The ring buffer must stay resident. This holds even if swap is enabled
+# system-wide, which it is by default on Raspberry Pi OS (as zram).
+MemorySwapMax=0
+
+# Normal scheduling class, niced down. FluidSynth's audio thread runs
+# SCHED_FIFO at realtime priority 90 and cannot be preempted by this.
+Nice=10
+
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
