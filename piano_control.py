@@ -328,13 +328,13 @@ class Matrix:
                 self.clear()
 
     def sleep(self, token: threading.Event, seconds: float) -> bool:
-        """Sleep unless cancelled. Returns False if cancelled."""
-        end = time.monotonic() + seconds
-        while time.monotonic() < end:
-            if token.is_set():
-                return False
-            time.sleep(0.01)
-        return not token.is_set()
+        """Sleep unless cancelled. Returns False if cancelled.
+
+        Event.wait blocks rather than polling, so a cancellation takes effect
+        the moment it happens instead of at the next poll -- which is what
+        makes an input interrupt an animation immediately.
+        """
+        return not token.wait(seconds)
 
     def scroll(self, token: threading.Event, text: str, colour) -> bool:
         columns = blank_columns(MATRIX_SIZE) + render_text(text) + blank_columns(MATRIX_SIZE)

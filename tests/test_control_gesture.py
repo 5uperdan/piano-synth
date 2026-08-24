@@ -10,6 +10,8 @@ FluidSynth, the capture service and the Sense HAT.
 """
 
 import sys
+import threading
+import time
 import types
 from pathlib import Path
 
@@ -17,7 +19,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from piano_control import App, Config
+from piano_control import App, Config, Matrix
 
 
 class StopLoop(Exception):
@@ -210,3 +212,31 @@ def test_direction_presses_still_act_immediately(build):
 
     assert app.cursor == 1
     assert capture.calls == 0
+
+
+# -- animation cancellation ------------------------------------------------
+
+@pytest.fixture
+def matrix():
+    return Matrix(FakeSense(FakeStick([])), Config({}))
+
+
+def test_sleep_reports_running_to_completion(matrix):
+    assert matrix.sleep(threading.Event(), 0.02) is True
+
+
+def test_sleep_reports_an_already_cancelled_token(matrix):
+    token = threading.Event()
+    token.set()
+    assert matrix.sleep(token, 5.0) is False
+
+
+def test_sleep_returns_the_moment_it_is_cancelled(matrix):
+    """Inputs must interrupt an animation immediately. If this ever blocks for
+    the full duration, "any input cancels the current behaviour" is broken."""
+    token = threading.Event()
+    threading.Timer(0.05, token.set).start()
+
+    start = time.monotonic()
+    assert matrix.sleep(token, 5.0) is False
+    assert time.monotonic() - start < 1.0
