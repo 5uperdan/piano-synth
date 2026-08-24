@@ -49,6 +49,10 @@ BLACK = (0, 0, 0)
 # rotated relative to the player.
 ROTATION_ORDER = ("up", "right", "down", "left")
 
+# Appended to batches of silently-succeeding commands purely so that there is
+# output to wait for. Must be cheap and must always print something.
+SYNC_COMMAND = "fonts"
+
 
 # --------------------------------------------------------------------------
 # Configuration
@@ -133,8 +137,10 @@ class FluidClient:
             try:
                 self.sock = socket.create_connection((self.host, self.port), timeout=5.0)
                 self.sock.setblocking(False)
-                # Swallow the greeting banner.
-                self._drain(timeout=1.0)
+                # Swallow any greeting banner, and confirm the shell answers.
+                # Real FluidSynth sends nothing on connect, so waiting blindly
+                # here just burned a fixed second at every startup.
+                self.silent_command()
                 LOG.info("Connected to FluidSynth on %s:%d", self.host, self.port)
                 return
             except OSError as exc:
@@ -173,6 +179,25 @@ class FluidClient:
         self.sock.sendall((text + "\n").encode("utf-8"))
         return self._drain(timeout=timeout)
 
+    def silent_command(self, *lines: str, timeout: float = 10.0) -> None:
+        """Issue commands that succeed without printing anything.
+
+        FluidSynth's shell prints nothing at all for `select`, `reset` and
+        friends, and offers no prompt, so there is no way to tell "no output
+        yet" from "no output ever" -- _drain would wait out its whole timeout
+        every time. Appending a command that always prints gives us a marker:
+        the shell processes a connection's input in order, so once the marker's
+        output arrives everything before it has been done.
+
+        Sending the whole batch in one write also collapses what used to be one
+        round trip per line into one for the lot.
+        """
+        if self.sock is None:
+            raise FluidError("Not connected")
+        payload = "".join(line + "\n" for line in (*lines, SYNC_COMMAND))
+        self.sock.sendall(payload.encode("utf-8"))
+        self._drain(timeout=timeout)
+
     # -- soundfont handling ------------------------------------------------
 
     def loaded_font_ids(self) -> list[int]:
@@ -192,8 +217,10 @@ class FluidClient:
         previous = self.loaded_font_ids()
 
         if not load_first:
-            for font_id in previous:
-                self.command(f"unload {font_id}", timeout=30.0)
+            if previous:
+                self.silent_command(
+                    *(f"unload {font_id}" for font_id in previous), timeout=30.0
+                )
             previous = []
 
         response = self.command(f'load "{path}"', timeout=load_timeout)
@@ -207,15 +234,19 @@ class FluidClient:
                 raise FluidError(f"Load failed for {path.name}: {response.strip()[:200]}")
             new_id = max(candidates)
 
-        # All notes off before we retarget channels, so nothing hangs.
-        self.command("reset")
-
         bank, program = self._first_preset(new_id)
-        for channel in range(16):
-            self.command(f"select {channel} {new_id} {bank} {program}", timeout=1.0)
 
-        for font_id in previous:
-            self.command(f"unload {font_id}", timeout=30.0)
+        # All notes off before retargeting channels, so nothing hangs. Batched
+        # into a single round trip: seventeen separate silent commands used to
+        # cost seventeen timeouts, which was around nineteen seconds of dead
+        # waiting on every switch regardless of soundfont size.
+        self.silent_command(
+            "reset",
+            *(f"select {channel} {new_id} {bank} {program}" for channel in range(16)),
+        )
+
+        if previous:
+            self.silent_command(*(f"unload {font_id}" for font_id in previous), timeout=30.0)
 
         LOG.info("Loaded %s as font %d (bank %d, program %d)", path.name, new_id, bank, program)
         return new_id
