@@ -12,6 +12,10 @@ soundfonts/*
 state.json
 recordings/
 
+# macOS AppleDouble files, which tar from a Mac scatters through the tree
+._*
+.DS_Store
+
 # Editors
 .vscode/
 .idea/
