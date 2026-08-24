@@ -31,7 +31,15 @@ show_ready_animation = true   # brief sweep once the startup font is loaded
 [colours]
 cursor = [0, 120, 255]
 loaded = [0, 70, 0]
-text = [110, 110, 110]
+
+# Scrolling text. Keep this to a SINGLE channel -- [0, n, 0], [n, 0, 0] or
+# [0, 0, n]. Each pixel on the Sense HAT is one package holding three separate
+# dies, so a white or mixed colour lights all three and you see three distinct
+# points per pixel, which smears the edges of a 3x5 glyph and makes it hard to
+# read. One channel lights one die: a single clean point. Green is the most
+# legible of the three because it sits at the eye's peak sensitivity; red is a
+# good alternative, blue the worst (the eye focuses it poorly).
+text = [0, 140, 0]
 success = [0, 150, 0]
 error = [150, 0, 0]
 busy = [140, 70, 0]
