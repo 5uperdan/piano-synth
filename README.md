@@ -77,7 +77,8 @@ boot.
 Twelve steps, start to finish. Allow about an hour, most of it downloads.
 
 **Before you start you need:** a Raspberry Pi 4 running Raspberry Pi OS
-**Lite 64-bit** (Bookworm or later) with SSH working, and a shell on it.
+**Lite 64-bit** with SSH working, and a shell on it. Verified end to end on
+Debian 13 (trixie), kernel 6.18, Python 3.13.
 
 Every command below is run **on the Pi**, from an SSH session, and uses
 `$USER` so it works whatever your username is. Check yours resolves:
@@ -131,6 +132,20 @@ dtparam=audio=off
 dtoverlay=vc4-kms-v3d,noaudio
 ```
 
+**Then enable the `i2c-dev` module.** This step is easy to miss: `dtparam=i2c_arm=on`
+brings up the I2C *bus*, but the `/dev/i2c-*` character devices that the
+`sense_hat` library actually talks through come from a separate kernel module.
+Enabling I2C via `raspi-config` would do both; editing `config.txt` by hand
+does only the first, and you get a Sense HAT that is visible on the bus but
+unreachable from Python.
+
+```bash
+echo i2c-dev | sudo tee /etc/modules-load.d/i2c-dev.conf
+```
+
+(The older advice is `echo i2c-dev >> /etc/modules`. On Trixie that file now
+announces itself as obsolete, so use `modules-load.d` instead.)
+
 ```bash
 sudo reboot
 ```
@@ -143,7 +158,29 @@ sudo reboot
 sudo apt update
 sudo apt install -y fluidsynth alsa-utils python3-sense-hat python3-rtimulib \
                     python3-mido python3-rtmidi \
-                    cpufrequtils rfkill git curl
+                    rfkill git curl socat
+```
+
+**Immediately disable the FluidSynth service Debian ships.** The package
+installs its own *user-level* unit, enabled globally, which starts a generic
+General MIDI synth on login. It takes exclusive ownership of the USB sound
+card **and** binds TCP port 9800 — which is FluidSynth's default shell port,
+and therefore exactly the one this project uses. Leave it in place and our
+`fluidsynth.service` can never start, with an error that is far from obvious
+when read through systemd.
+
+```bash
+systemctl --user disable --now fluidsynth.service
+sudo systemctl --global disable fluidsynth.service
+```
+
+Both lines are needed. The first stops it now; the second removes the global
+symlink under `/etc/systemd/user/`, without which it returns at next login.
+
+Confirm nothing is holding the port or the card:
+
+```bash
+pgrep -a fluidsynth        # should print nothing
 ```
 
 Three of these must come from apt rather than pip: `python3-rtimulib` (which
@@ -250,19 +287,39 @@ systemd services do not read `limits.conf`. You need both.
 
 ## 7. CPU frequency and swap
 
-The Pi clocks down when idle and takes a moment to ramp up, which shows up as
-dropouts on the first notes after a pause.
+The Pi clocks down when idle and takes a moment to ramp up, which can show up
+as dropouts on the first notes after a pause.
+
+**This step is optional — try without it first.** On a Pi 4 running only this
+project, measured load sits around 0.08 and no underruns appear at
+`period-size=128` with the governor left on `ondemand`. Only reach for it if
+you actually hear a dropout on the first note after a silence.
+
+> **`cpufrequtils` does not exist on Trixie** (`apt-cache policy` reports no
+> candidate). Older versions of this README told you to install it; that
+> instruction fails on Debian 13.
+
+If you do need it, a small unit avoids depending on any package:
 
 ```bash
-sudo tee /etc/default/cpufrequtils >/dev/null <<'EOF'
-GOVERNOR="performance"
+sudo tee /etc/systemd/system/cpu-performance.service >/dev/null <<'EOF'
+[Unit]
+Description=Pin CPU governor to performance for low-latency audio
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'for c in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo performance > "$c"; done'
+
+[Install]
+WantedBy=multi-user.target
 EOF
-sudo systemctl enable --now cpufrequtils
+sudo systemctl enable --now cpu-performance.service
 ```
 
-**Check:** `cpufreq-info | grep "current policy"` shows the performance
-governor. This raises idle power and temperature slightly — acceptable for an
-always-on appliance, and the reason the stacking header in step 1 is worth
+**Check:** `cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor` prints
+`performance`. This raises idle power and temperature slightly — acceptable for
+an always-on appliance, and part of why the stacking header in step 1 is worth
 having.
 
 ### Then check what kind of swap you have
@@ -297,20 +354,21 @@ git clone https://github.com/5uperdan/piano-synth.git /home/$USER/piano-synth
 cd /home/$USER/piano-synth
 ```
 
-Install uv if you don't have it:
-
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-source ~/.bashrc
-```
-
 Create the virtualenv. **`--system-site-packages` is not optional** — it is how
-the venv sees the apt-installed `sense_hat` and `rtmidi`:
+the venv sees the apt-installed `sense_hat`, `rtmidi` and `mido`:
 
 ```bash
-uv venv --system-site-packages
-uv sync
+python3 -m venv --system-site-packages .venv
 ```
+
+> **Why not uv?** Earlier versions of this README used it. But
+> `pyproject.toml` declares `dependencies = []` — every real dependency comes
+> from apt, because all three are C-backed libraries that don't install
+> reliably from PyPI on ARM. That leaves uv with nothing to manage beyond
+> creating an empty venv, which Python does natively. It also isn't packaged
+> for Trixie, so using it means running an install script off the internet for
+> no benefit. If you want uv anyway, `uv venv --system-site-packages` is a
+> drop-in replacement for the line above.
 
 **Check:** the venv can reach the system libraries.
 
@@ -357,6 +415,22 @@ Interface", set `port_match` to a distinctive part of it.
 ---
 
 ## 10. Add soundfonts
+
+**You already have one.** Installing `fluidsynth` in step 3 pulls in
+`fluid-soundfont-gm`, so there is a 142MB General MIDI font on disk before you
+download anything. Its grand piano is ordinary but perfectly good for proving
+the system works — link it in and you can skip ahead:
+
+```bash
+ln -s /usr/share/sounds/sf2/FluidR3_GM.sf2 ~/soundfonts/FluidR3-GM.sf2
+ln -s /usr/share/sounds/sf2/TimGM6mb.sf2   ~/soundfonts/TimGM6mb.sf2
+```
+
+Two fonts rather than one is worth it during setup: it lets you test cursor
+movement and font switching, not just loading. Symlinks are fine — the scanner
+follows them.
+
+For a genuinely better piano, add a dedicated font later:
 
 ```bash
 cd ~/soundfonts
@@ -645,10 +719,34 @@ and lose SSH, a power cycle brings it back.
 
 **No sound at all, but MIDI arrives.**
 Check FluidSynth actually opened the audio device:
-`journalctl -u fluidsynth -n 50`. An ALSA "device busy" error means something
-else has the card — usually a leftover manual `fluidsynth` process. Very small
-buffer values can also make ALSA refuse to open the device without a loud
-error; try `period-size=256`.
+`journalctl -u fluidsynth -n 50`.
+
+`The "hw:CARD=..." audio device is used by another application`, usually paired
+with `error 98 while trying to bind server socket`, means something else holds
+the card and port 9800. By far the most likely culprit is the FluidSynth
+service Debian ships — see step 3. Find out what has it:
+
+```bash
+pgrep -a fluidsynth
+fuser -v /dev/snd/*
+```
+
+Very small buffer values can also make ALSA refuse the device; try
+`period-size=256`.
+
+**Debugging FluidSynth generally: run it by hand.** Errors are far easier to
+read directly than through a unit that is restarting in a loop:
+
+```bash
+sudo systemctl stop fluidsynth
+timeout 8 /usr/bin/fluidsynth -is -a alsa \
+  -o audio.alsa.device=hw:CARD=S3,DEV=0 \
+  -o audio.period-size=128 -o audio.periods=2 \
+  -m alsa_seq -o midi.autoconnect=1 -o shell.port=9800
+```
+
+Substitute your own card string. If it stays up for the full 8 seconds with no
+errors, the configuration is sound and the problem is in the unit file.
 
 **Sound works but is very quiet.**
 Raise `-g 2.0` in the service file (up to about 5.0 before clipping) and check
@@ -664,6 +762,17 @@ underrun messages.
 `systemctl status piano-control`. If it's restarting in a loop,
 `journalctl -u piano-control -n 50` will say why — usually the venv can't
 import `sense_hat` (redo step 8) or it can't reach FluidSynth on port 9800.
+
+**Sense HAT reports an I2C error, or `SenseHat()` raises on startup.**
+Check the device nodes exist:
+
+```bash
+ls /dev/i2c-*
+```
+
+If they're missing but `ls /sys/bus/i2c/devices/` shows entries like `1-001c`
+and `1-0046`, the bus is fine and the HAT is detected — you're only missing the
+`i2c-dev` module. See step 2.
 
 **Joystick directions are wrong.**
 Set `joystick_rotation` in `config.toml` to 90, 180 or 270 until they match.
