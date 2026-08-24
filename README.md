@@ -471,8 +471,46 @@ become the scrolling display names, so keep them short — `Yamaha-C5` reads far
 better on an 8x8 grid than `Yamaha-C5-Salamander-JNv4.0-final`. The font covers
 A–Z, 0–9 and common punctuation; anything else renders as `?`.
 
-The directory is scanned once at startup, so after adding files later:
-`sudo systemctl restart piano-control`.
+### Adding fonts later
+
+> **The soundfont directory is scanned once, at startup.** Anything you add
+> while the service is running is invisible until you restart it:
+>
+> ```bash
+> sudo systemctl restart piano-control
+> ```
+
+### Size, and why it matters
+
+Measured read throughput on a Pi 4's SD card is around **43 MB/s**, and
+FluidSynth reads the whole file into RAM before it can play a note. That sets
+the load time, and the load blocks the control app:
+
+| Soundfont | Size | Cold load |
+|---|---|---|
+| TimGM6mb | 5.7MB | instant |
+| FluidR3-GM | 142MB | ~3s |
+| Nice-Steinway | 205MB | ~5s |
+| Nice-Keys-Ultimate | 1.2GB | ~30s |
+
+Two consequences worth planning around:
+
+- **Selecting a large font blocks the display.** You get a steady amber pixel
+  and an unresponsive joystick until it finishes. Nothing is broken and queued
+  input is drained afterwards, but 30 seconds is a long stare at one LED.
+- **It also delays boot**, because `state.json` reloads whatever you last
+  selected. If a 1.2GB font is your remembered choice, "power on and play"
+  becomes "power on, wait half a minute, play". Something smaller as your
+  everyday default, with the big one as a deliberate choice, keeps the
+  appliance feel.
+
+Repeat loads of the same font are much faster than the table suggests — Linux
+keeps it in the page cache, so a 1.2GB font that took 30s cold may reload in
+about 5s. The cold figure is the one that applies after a reboot.
+
+Recording is unaffected throughout. `piano-capture` is a separate process, so a
+30-second blocking load in `piano-control` doesn't punch a hole in what you
+were playing.
 
 ---
 
@@ -513,6 +551,28 @@ sudo systemctl enable --now fluidsynth.service
 sudo systemctl enable --now piano-capture.service
 sudo systemctl enable --now piano-control.service
 ```
+
+### Updating later
+
+Editing the sound card into `systemd/fluidsynth.service` leaves that file
+permanently modified in your working tree, so `git status` will always show it.
+That's expected — the card name is specific to your machine.
+
+`git pull` still works: git only refuses when incoming changes touch a file
+you've modified locally. If a future change does touch that file you'll get a
+conflict, and keeping your own `audio.alsa.device` line is the right
+resolution.
+
+After pulling anything that changes the Python or the units:
+
+```bash
+sudo cp systemd/*.service /etc/systemd/system/   # only if a unit changed
+sudo systemctl daemon-reload
+sudo systemctl restart piano-control piano-capture
+```
+
+`fluidsynth` only needs restarting if you changed its unit — leaving it alone
+means audio keeps playing across an update of the front end.
 
 ---
 
