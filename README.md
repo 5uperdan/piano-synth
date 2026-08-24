@@ -430,12 +430,41 @@ Two fonts rather than one is worth it during setup: it lets you test cursor
 movement and font switching, not just loading. Symlinks are fine — the scanner
 follows them.
 
-For a genuinely better piano, add a dedicated font later:
+### Getting a better piano
+
+The GM font is fine for proving things work, but its grand piano is exactly as
+ordinary as you'd expect from a general-purpose bank. For something that
+actually sounds like a piano, the **soundfonts4u** collection on Hugging Face
+is the easiest source — direct download, no account, no sign-up page in the
+way:
 
 ```bash
 cd ~/soundfonts
-curl -L -o Yamaha-C5.sf2 'URL_HERE'
+curl -L --fail -o Nice-Steinway.sf2 \
+  'https://huggingface.co/datasets/projectlosangeles/soundfonts4u/resolve/main/Nice-Steinway-v3.8.sf2'
 ```
+
+That one is 205MB. Browse the rest at
+<https://huggingface.co/datasets/projectlosangeles/soundfonts4u> — any file
+there can be fetched by putting its name after `resolve/main/`.
+
+Three things worth knowing:
+
+- **Use `--fail`.** Without it, a 404 or an expired link leaves curl happily
+  writing the *error page* into `Nice-Steinway.sf2`. You then get an HTML
+  document with a `.sf2` extension, which the scanner picks up and FluidSynth
+  rejects with a thoroughly unhelpful message. `--fail` makes curl exit
+  non-zero and write nothing.
+- **Add `-C -` if your wifi is flaky.** A 205MB download to a Pi is long enough
+  to be worth resuming rather than restarting.
+- **Rename to something short.** The filename becomes the scrolling display
+  name, and `Nice-Steinway` reads far better on an 8x8 grid than
+  `Nice-Steinway-v3.8`.
+
+A font this size takes a few seconds to load off the SD card and stays resident
+in RAM while selected, which is what `load_before_unload` in step 9 is about.
+Licensing across the collection is mixed and not always stated; fine for
+playing at home, worth checking before you use one on a recording you publish.
 
 Only `.sf2` and `.sf3` are picked up, and at most 64 (one per LED). Filenames
 become the scrolling display names, so keep them short — `Yamaha-C5` reads far
