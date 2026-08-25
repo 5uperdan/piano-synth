@@ -54,6 +54,27 @@ toggle_enabled = false
 hold_seconds = 2.0
 hold_direction = "up"
 
+[pedal]
+# Where the sustain pedal engages.
+#
+# MIDI treats CC64 as a switch at 64, and FluidSynth follows that. Pianos with
+# a half-damper pedal report an intermediate value for the partial position --
+# a Yamaha P-95 sends 0 (up), 56 (partial) and 127 (down) -- and 56 falls below
+# 64, so the entire partial zone reads as pedal-up. Sustain then arrives only
+# when the pedal is pressed all the way down, which feels like it needs a
+# deeper press than the piano's own engine wants.
+#
+# Set this to the value your piano reports for its partial position and sustain
+# will engage there instead. Find yours with:
+#   aseqdump -p "USB MIDI Interface" | grep "controller 64"
+#
+# Leave at 64 for standard MIDI behaviour and the router is not touched at all.
+#
+# Note this only moves where the switch flips. It cannot give partial damping:
+# SoundFont 2 has no parameter for a half-damped string, so any value at or
+# above the threshold is full sustain.
+sustain_threshold = 56
+
 [capture]
 # Rolling MIDI recording. Everything you play is held in memory; nothing is
 # written to disk until you hold the joystick in. See the README.

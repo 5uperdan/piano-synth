@@ -53,6 +53,9 @@ ROTATION_ORDER = ("up", "right", "down", "left")
 # output to wait for. Must be cheap and must always print something.
 SYNC_COMMAND = "fonts"
 
+# MIDI defines sustain as a switch: CC64 >= 64 is down, below is up.
+MIDI_SUSTAIN_THRESHOLD = 64
+
 
 # --------------------------------------------------------------------------
 # Configuration
@@ -98,6 +101,9 @@ class Config:
         self.wifi_toggle_enabled = bool(wifi.get("toggle_enabled", False))
         self.wifi_hold_seconds = float(wifi.get("hold_seconds", 2.0))
         self.wifi_hold_direction = wifi.get("hold_direction", "up")
+
+        pedal = data.get("pedal", {})
+        self.sustain_threshold = int(pedal.get("sustain_threshold", MIDI_SUSTAIN_THRESHOLD))
 
         capture = data.get("capture", {})
         self.capture_enabled = bool(capture.get("enabled", True))
@@ -197,6 +203,49 @@ class FluidClient:
         payload = "".join(line + "\n" for line in (*lines, SYNC_COMMAND))
         self.sock.sendall(payload.encode("utf-8"))
         self._drain(timeout=timeout)
+
+    def configure_sustain(self, threshold: int) -> None:
+        """Move the point at which the sustain pedal engages.
+
+        MIDI treats CC64 as a switch at 64, and FluidSynth follows that. Pianos
+        with a half-damper pedal report an intermediate value for the partial
+        position -- a Yamaha P-95 sends 0, 56 and 127 -- and 56 falls below the
+        threshold, so the whole partial zone reads as pedal-up and sustain
+        arrives only when the pedal is pressed all the way down.
+
+        Rewriting CC64 in FluidSynth's MIDI router fixes where the switch
+        flips. It cannot produce partial damping: SoundFont 2 has no parameter
+        for a half-damped string, so sustain is binary whatever we feed it.
+
+        The router is cleared first and every event type re-admitted
+        explicitly, because rules add to the existing set rather than replacing
+        it -- leaving the defaults in place would deliver every CC64 twice, once
+        rewritten and once raw, and the raw one would drop the damper again.
+        """
+        if threshold == MIDI_SUSTAIN_THRESHOLD:
+            return                      # standard behaviour; leave the router alone
+
+        threshold = max(1, min(127, threshold))
+        self.silent_command(
+            "router_clear",
+            # Re-admit everything the piano sends, unfiltered.
+            "router_begin note", "router_end",
+            "router_begin pbend", "router_end",
+            "router_begin prog", "router_end",
+            "router_begin cpress", "router_end",
+            "router_begin kpress", "router_end",
+            # Every controller except 64 passes straight through.
+            "router_begin cc", "router_par1 0 63 1 0", "router_end",
+            "router_begin cc", "router_par1 65 127 1 0", "router_end",
+            # CC64 becomes a clean switch at `threshold`.
+            "router_begin cc", "router_par1 64 64 1 0",
+            f"router_par2 0 {threshold - 1} 0 0", "router_end",
+            "router_begin cc", "router_par1 64 64 1 0",
+            f"router_par2 {threshold} 127 0 127", "router_end",
+            timeout=10.0,
+        )
+        LOG.info("Sustain pedal engages at CC64 >= %d (MIDI default is %d)",
+                 threshold, MIDI_SUSTAIN_THRESHOLD)
 
     # -- soundfont handling ------------------------------------------------
 
@@ -739,6 +788,11 @@ def main() -> int:
     except FluidError as exc:
         LOG.error("%s", exc)
         return 1
+
+    # Router rules live in the running FluidSynth, so they are reapplied on
+    # every connect. piano-control Requires= fluidsynth, so systemd restarts
+    # this service if the synth ever goes away, and the rules come back with it.
+    fluid.configure_sustain(config.sustain_threshold)
 
     capture = CaptureClient(config.capture_socket) if config.capture_enabled else None
     if capture is None:

@@ -698,6 +698,79 @@ uv run --with mido --with pytest pytest tests/ -q
 
 ---
 
+# The sustain pedal
+
+If sustain feels like it needs a deeper press through the Pi than it does
+playing the piano directly, this is why.
+
+MIDI treats CC64 as a **switch**: 64 or above is down, below is up. FluidSynth
+follows that. But a piano with a half-damper pedal reports intermediate values
+for partial positions — a Yamaha P-95 sends exactly three:
+
+| Damper on the piano | CC64 | FluidSynth does |
+|---|---|---|
+| none | 0 | off |
+| **partial** | **56** | **off** |
+| full | 127 | on |
+
+Two of three states agree. The middle one doesn't, because 56 falls eight
+counts below the threshold — so the entire partial-damper zone reads as
+pedal-up, and sustain arrives only once the pedal is pressed all the way down.
+
+## Find your own value
+
+```bash
+aseqdump -p "USB MIDI Interface" | grep "controller 64"
+```
+
+Play with the pedal at various depths. If you only ever see `0` and `127`, your
+pedal is a plain switch and none of this applies. If an intermediate value
+appears, that's your half-damper position.
+
+## Fix it
+
+Set `sustain_threshold` under `[pedal]` in `config.toml` to that value:
+
+```toml
+[pedal]
+sustain_threshold = 56
+```
+
+then `sudo systemctl restart piano-control`. The control app rewrites CC64 in
+FluidSynth's MIDI router so the switch flips where your foot expects it.
+Leaving it at 64 keeps standard behaviour and the router is not touched at all.
+
+You should see it confirmed in the log:
+
+```
+INFO Sustain pedal engages at CC64 >= 56 (MIDI default is 64)
+```
+
+## What this cannot do
+
+It moves where the switch flips. **It does not give you partial damping**, and
+nothing in this stack can: SoundFont 2 has no parameter for a half-damped
+string, so any value at or above the threshold is full sustain. You are
+choosing where the on/off point sits, not gaining a third state.
+
+If graduated damping is what you're missing — the note thinning rather than
+switching — that needs a physically modelled engine such as Pianoteq, which
+simulates damper-to-string contact directly.
+
+Two things worth knowing:
+
+- **Rules live in the running FluidSynth**, not in a file, so they are
+  reapplied every time `piano-control` connects. `piano-control` declares
+  `Requires=fluidsynth.service`, so if the synth restarts systemd restarts the
+  control app too and the rules come back with it.
+- **Your recordings are unaffected.** `piano-capture` taps the MIDI stream
+  upstream of FluidSynth, so saved files hold the true `56`, not the rewritten
+  `127`. The nuance your pedal produces is preserved on disk even though this
+  playback path cannot render it — which matters if you ever replay those files
+  through something that can.
+
+---
+
 # Latency tuning
 
 Buffer settings live in `systemd/fluidsynth.service`:

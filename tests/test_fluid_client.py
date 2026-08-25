@@ -191,3 +191,66 @@ def test_connecting_to_nothing_raises_rather_than_hanging(tmp_path):
 
     with pytest.raises(FluidError, match="Could not reach"):
         FluidClient("127.0.0.1", port).connect(retries=2, delay=0.1)
+
+
+# -- sustain pedal threshold ----------------------------------------------
+
+def test_standard_threshold_leaves_the_router_untouched(client, fake):
+    """64 is what MIDI specifies, so there is nothing to rewrite."""
+    fake.received.clear()
+    client.configure_sustain(64)
+    assert not any(c.startswith("router") for c in fake.received)
+
+
+def test_lower_threshold_makes_the_half_pedal_position_engage(client, fake):
+    fake.received.clear()
+    client.configure_sustain(56)
+
+    assert "router_clear" in fake.received
+    # At or above the threshold becomes full sustain...
+    assert "router_par2 56 127 0 127" in fake.received
+    # ...and everything below it is forced fully off.
+    assert "router_par2 0 55 0 0" in fake.received
+    # Both rules must be scoped to controller 64 alone.
+    assert fake.received.count("router_par1 64 64 1 0") == 2
+
+
+def test_every_event_type_is_readmitted_after_clearing(client, fake):
+    """router_clear blocks *all* MIDI. Forget to re-admit an event type here
+    and the piano goes silent, which is a far worse bug than the one being
+    fixed."""
+    fake.received.clear()
+    client.configure_sustain(56)
+
+    for kind in ("note", "pbend", "prog", "cpress", "kpress"):
+        assert f"router_begin {kind}" in fake.received, f"{kind} events would be dropped"
+    # Controllers other than 64 must still get through.
+    assert "router_par1 0 63 1 0" in fake.received
+    assert "router_par1 65 127 1 0" in fake.received
+
+
+def test_rules_are_balanced(client, fake):
+    fake.received.clear()
+    client.configure_sustain(56)
+    begins = [c for c in fake.received if c.startswith("router_begin")]
+    ends = [c for c in fake.received if c == "router_end"]
+    assert len(begins) == len(ends)
+
+
+def test_threshold_is_clamped_to_a_usable_range(client, fake):
+    fake.received.clear()
+    client.configure_sustain(0)          # would otherwise build "0 -1" as a range
+    assert "router_par2 0 0 0 0" in fake.received
+    assert "router_par2 1 127 0 127" in fake.received
+
+
+def test_configuring_sustain_is_idempotent(client, fake):
+    """It reruns on every reconnect, so applying it twice must be harmless."""
+    client.configure_sustain(56)
+    first = [c for c in fake.received if c.startswith("router")]
+    fake.received.clear()
+    client.configure_sustain(56)
+    second = [c for c in fake.received if c.startswith("router")]
+
+    assert first == second
+    assert second.count("router_clear") == 1
