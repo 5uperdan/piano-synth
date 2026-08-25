@@ -102,6 +102,11 @@ class Config:
         self.wifi_hold_seconds = float(wifi.get("hold_seconds", 2.0))
         self.wifi_hold_direction = wifi.get("hold_direction", "up")
 
+        shutdown = data.get("shutdown", {})
+        self.shutdown_enabled = bool(shutdown.get("enabled", True))
+        self.shutdown_direction = shutdown.get("hold_direction", "down")
+        self.shutdown_hold_seconds = float(shutdown.get("hold_seconds", 5.0))
+
         pedal = data.get("pedal", {})
         self.sustain_threshold = int(pedal.get("sustain_threshold", MIDI_SUSTAIN_THRESHOLD))
 
@@ -467,6 +472,21 @@ def set_wifi(blocked: bool) -> bool:
     return True
 
 
+def poweroff() -> bool:
+    """Halt the machine. Needs a narrow NOPASSWD sudoers rule; see the README."""
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", "/sbin/poweroff"], capture_output=True, text=True, timeout=10
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        LOG.error("poweroff failed: %s", exc)
+        return False
+    if result.returncode != 0:
+        LOG.error("poweroff failed: %s", result.stderr.strip())
+        return False
+    return True
+
+
 # --------------------------------------------------------------------------
 # Application
 # --------------------------------------------------------------------------
@@ -489,6 +509,16 @@ class App:
         # different from tapping it. Set while a press is in flight; cleared by
         # whichever action claims it.
         self._middle_pressed_at: float | None = None
+        # A direction held down drives the shutdown countdown. `_shutdown_lit`
+        # is how much of the grid is currently filled, so the display is only
+        # redrawn when it actually changes.
+        self._direction_held: str | None = None
+        self._direction_pressed_at: float | None = None
+        self._shutdown_lit = 0
+        # Latched once the countdown completes: the main loop keeps running
+        # while the machine halts, and without this poweroff would be called
+        # on every pass.
+        self._shutdown_fired = False
 
     # -- soundfont inventory ------------------------------------------------
 
@@ -659,6 +689,68 @@ class App:
             LOG.info("Saved recording %s", name)
             self.matrix.full_flash(self.config.colour_success, 2, 0.1, 0.08)
 
+    def shutdown_progress(self, held_for: float) -> int:
+        """How many of the 64 pixels a hold of `held_for` seconds has earned."""
+        if self.config.shutdown_hold_seconds <= 0:
+            return MATRIX_PIXELS
+        fraction = held_for / self.config.shutdown_hold_seconds
+        return max(0, min(MATRIX_PIXELS, int(fraction * MATRIX_PIXELS)))
+
+    def update_shutdown(self, now: float) -> None:
+        """Fill the grid while the shutdown direction is held; clear on release.
+
+        Deliberately driven by elapsed time in the main loop rather than by
+        "held" events, which arrive at the kernel's key-repeat rate -- too
+        coarse and too variable to animate against. Releasing abandons the
+        countdown immediately, which is the whole safety mechanism: you can
+        start one out of curiosity and let go.
+        """
+        if not self.config.shutdown_enabled:
+            return
+
+        holding = (
+            self._direction_pressed_at is not None
+            and self._direction_held is not None
+            and self.rotate(self._direction_held) == self.config.shutdown_direction
+        )
+        if not holding:
+            self._shutdown_fired = False
+            if self._shutdown_lit:
+                self._shutdown_lit = 0
+                self.matrix.clear()
+            return
+
+        lit = self.shutdown_progress(now - self._direction_pressed_at)
+        if lit == 0:
+            return
+
+        if self._shutdown_lit == 0:
+            self.matrix.cancel()          # take the display off any animation
+        if lit != self._shutdown_lit:
+            self._shutdown_lit = lit
+            self.matrix.show_marks({i: self.config.colour_error for i in range(lit)})
+        # Hold counts as activity, or the idle timeout would blank the countdown.
+        self.last_input = now
+
+        if lit >= MATRIX_PIXELS and not self._shutdown_fired:
+            self._shutdown_fired = True
+            self.trigger_shutdown()
+
+    def trigger_shutdown(self) -> None:
+        LOG.warning("Shutdown requested from the joystick")
+        self.matrix.show_marks({i: self.config.colour_error for i in range(MATRIX_PIXELS)})
+
+        if poweroff():
+            # Leave the matrix lit. systemd stops this service moments from
+            # now, and a full red grid is a clearer "going down" signal than a
+            # display that blanks and leaves you guessing.
+            return
+
+        LOG.error("Shutdown refused. Is /etc/sudoers.d/piano-shutdown installed?")
+        self.matrix.full_flash(self.config.colour_error, 3, 0.1, 0.1)
+        self._shutdown_lit = 0
+        self._direction_pressed_at = None
+
     def handle_press(self, direction: str) -> None:
         self.last_input = time.monotonic()
 
@@ -726,12 +818,17 @@ class App:
                         self._middle_pressed_at = now
                         self.last_input = now
                     else:
+                        self._direction_held = event.direction
+                        self._direction_pressed_at = now
                         self.handle_press(event.direction)
                 elif event.action == "held":
                     if event.direction != "middle":
                         self.handle_hold(event.direction, time.monotonic())
                 elif event.action == "released":
                     self._hold_started = None
+                    if event.direction != "middle":
+                        self._direction_held = None
+                        self._direction_pressed_at = None
                     if event.direction == "middle" and self._middle_pressed_at is not None:
                         # Still pending, so the hold never fired: it was a tap.
                         self._middle_pressed_at = None
@@ -748,6 +845,8 @@ class App:
                 self._middle_pressed_at = None
                 self.save_recording()
                 self.sense.stick.get_events()
+
+            self.update_shutdown(now)
 
             if self.awake and now - self.last_input > self.config.idle_timeout:
                 self.awake = False

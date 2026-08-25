@@ -19,6 +19,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import piano_control
 from piano_control import App, Config, Matrix
 
 
@@ -51,12 +52,13 @@ class FakeSense:
     def __init__(self, stick):
         self.stick = stick
         self.low_light = True
+        self.lit_counts = []          # non-black pixels per frame drawn
 
     def clear(self):
-        pass
+        self.lit_counts.append(0)
 
     def set_pixels(self, frame):
-        pass
+        self.lit_counts.append(sum(1 for p in frame if p != (0, 0, 0)))
 
     def set_rotation(self, rotation):
         pass
@@ -91,7 +93,7 @@ def build(tmp_path):
     (fonts / "Alpha.sf2").write_bytes(b"x")
     (fonts / "Beta.sf2").write_bytes(b"x")
 
-    def _build(script, hold_seconds=0.1):
+    def _build(script, hold_seconds=0.1, shutdown_seconds=0.2, shutdown=True):
         config = Config({
             "paths": {
                 "soundfont_dir": str(fonts),
@@ -103,12 +105,17 @@ def build(tmp_path):
                 "scroll_step_seconds": 0.001,
             },
             "capture": {"hold_seconds": hold_seconds},
+            "shutdown": {
+                "enabled": shutdown,
+                "hold_direction": "down",
+                "hold_seconds": shutdown_seconds,
+            },
         })
         sense = FakeSense(FakeStick(script))
         fluid = FakeFluid()
         capture = FakeCapture()
         app = App(config, sense, fluid, capture)
-        return app, fluid, capture
+        return app, fluid, capture, sense
 
     return _build
 
@@ -122,7 +129,7 @@ def run(app):
 
 def test_a_tap_still_loads_the_font_under_the_cursor(build):
     """The pre-existing behaviour must survive the move to release."""
-    app, fluid, capture = build([
+    app, fluid, capture, _sense = build([
         [event("right", "pressed")],       # wake
         [event("right", "pressed")],       # move to Beta
         [event("middle", "pressed")],
@@ -136,7 +143,7 @@ def test_a_tap_still_loads_the_font_under_the_cursor(build):
 
 
 def test_nothing_loads_until_the_button_is_released(build):
-    app, fluid, capture = build([[event("middle", "pressed")]] , hold_seconds=99)
+    app, fluid, capture, _sense = build([[event("middle", "pressed")]] , hold_seconds=99)
     run(app)
 
     assert fluid.loaded == ["Alpha.sf2"]      # startup only, no tap action
@@ -146,7 +153,7 @@ def test_nothing_loads_until_the_button_is_released(build):
 # -- hold ------------------------------------------------------------------
 
 def test_holding_saves_a_recording(build):
-    app, fluid, capture = build([[event("middle", "pressed")]])
+    app, fluid, capture, _sense = build([[event("middle", "pressed")]])
     run(app)
 
     assert capture.calls == 1
@@ -154,7 +161,7 @@ def test_holding_saves_a_recording(build):
 
 def test_holding_does_not_also_load(build):
     """The release that ends a hold must not fall through to the tap action."""
-    app, fluid, capture = build([
+    app, fluid, capture, _sense = build([
         [event("right", "pressed")],       # wake
         [event("right", "pressed")],       # move onto Beta
         [event("middle", "pressed")],
@@ -168,7 +175,7 @@ def test_holding_does_not_also_load(build):
 
 
 def test_a_hold_saves_exactly_once(build):
-    app, fluid, capture = build([[event("middle", "pressed")]])
+    app, fluid, capture, _sense = build([[event("middle", "pressed")]])
     run(app)
 
     assert capture.calls == 1
@@ -177,7 +184,7 @@ def test_a_hold_saves_exactly_once(build):
 def test_saving_works_while_the_display_is_asleep(build):
     """You will be mid-playing and not looking at the HAT when you reach for
     this, so it must not require waking the display first."""
-    app, fluid, capture = build([[event("middle", "pressed")]])
+    app, fluid, capture, _sense = build([[event("middle", "pressed")]])
     assert app.awake is False
     run(app)
 
@@ -186,7 +193,7 @@ def test_saving_works_while_the_display_is_asleep(build):
 
 
 def test_a_failed_save_does_not_kill_the_app(build, tmp_path):
-    app, fluid, capture = build([[event("middle", "pressed")]])
+    app, fluid, capture, _sense = build([[event("middle", "pressed")]])
     app.capture = FakeCapture(error=OSError("capture service is down"))
     run(app)                                   # StopLoop, not OSError
 
@@ -194,7 +201,7 @@ def test_a_failed_save_does_not_kill_the_app(build, tmp_path):
 
 
 def test_hold_is_inert_when_capture_is_disabled(build):
-    app, fluid, _ = build([[event("middle", "pressed")]])
+    app, fluid, _capture, _sense = build([[event("middle", "pressed")]])
     app.capture = None
     run(app)
 
@@ -204,7 +211,7 @@ def test_hold_is_inert_when_capture_is_disabled(build):
 # -- direction buttons are untouched ---------------------------------------
 
 def test_direction_presses_still_act_immediately(build):
-    app, fluid, capture = build([
+    app, fluid, capture, _sense = build([
         [event("right", "pressed")],
         [event("right", "pressed")],
     ])
@@ -240,3 +247,89 @@ def test_sleep_returns_the_moment_it_is_cancelled(matrix):
     start = time.monotonic()
     assert matrix.sleep(token, 5.0) is False
     assert time.monotonic() - start < 1.0
+
+
+# -- shutdown countdown ----------------------------------------------------
+
+@pytest.fixture
+def halted(monkeypatch):
+    """Records poweroff calls instead of actually halting the machine."""
+    calls = []
+    monkeypatch.setattr(piano_control, "poweroff", lambda: (calls.append(1), True)[1])
+    return calls
+
+
+def test_holding_down_to_a_full_grid_powers_off(build, halted):
+    app, fluid, capture, sense = build([[event("down", "pressed")]])
+    run(app)
+
+    assert len(halted) == 1
+
+
+def test_releasing_early_aborts(build, halted):
+    """The entire safety mechanism: you can start one and let go."""
+    app, fluid, capture, sense = build(
+        [[event("down", "pressed")], [], [], [event("down", "released")]],
+        shutdown_seconds=5.0,
+    )
+    run(app)
+
+    assert halted == []
+
+
+def test_the_grid_fills_progressively(build, halted):
+    app, fluid, capture, sense = build([[event("down", "pressed")]])
+    run(app)
+
+    counts = sense.lit_counts
+    # The grid should pass through partial fills rather than jumping from
+    # blank straight to done. (Monotonicity is asserted against
+    # shutdown_progress directly; these frames are interleaved with the
+    # cursor animation the same key press starts, so ordering here is noisy.)
+    assert any(0 < c < 64 for c in counts), "countdown never showed an intermediate state"
+    assert max(counts) == 64, "countdown never completed"
+
+
+def test_the_display_is_cleared_when_the_hold_is_abandoned(build, halted):
+    app, fluid, capture, sense = build(
+        [[event("down", "pressed")], [], [], [event("down", "released")]],
+        shutdown_seconds=5.0,
+    )
+    run(app)
+
+    assert sense.lit_counts[-1] == 0
+
+
+def test_other_directions_do_not_start_a_countdown(build, halted):
+    app, fluid, capture, sense = build([[event("up", "pressed")]])
+    run(app)
+
+    assert halted == []
+    assert max(sense.lit_counts) < 64
+
+
+def test_disabling_it_makes_the_gesture_inert(build, halted):
+    app, fluid, capture, sense = build([[event("down", "pressed")]], shutdown=False)
+    run(app)
+
+    assert halted == []
+
+
+def test_a_refused_shutdown_does_not_kill_the_app(build, monkeypatch):
+    """No sudoers rule means poweroff fails. That must flash and carry on."""
+    monkeypatch.setattr(piano_control, "poweroff", lambda: False)
+    app, fluid, capture, sense = build([[event("down", "pressed")]])
+
+    run(app)                                   # StopLoop, not an exception
+
+    assert fluid.loaded == ["Alpha.sf2"]       # still alive and serving
+
+
+def test_progress_is_monotonic_and_bounded():
+    config = Config({"shutdown": {"hold_seconds": 5.0}})
+    app = App(config, FakeSense(FakeStick([])), FakeFluid(), FakeCapture())
+
+    assert app.shutdown_progress(0.0) == 0
+    assert app.shutdown_progress(2.5) == 32
+    assert app.shutdown_progress(5.0) == 64
+    assert app.shutdown_progress(60.0) == 64   # clamped, never overruns

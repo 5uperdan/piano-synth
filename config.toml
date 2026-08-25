@@ -54,6 +54,20 @@ toggle_enabled = false
 hold_seconds = 2.0
 hold_direction = "up"
 
+[shutdown]
+# Powering off cleanly without SSH. Hold the joystick in `hold_direction` and
+# the grid fills over `hold_seconds`; let go at any point and nothing happens.
+# Only when the grid is completely full does it halt.
+#
+# Requires a narrow sudoers rule, or it will flash red and log why:
+#   sudo tee /etc/sudoers.d/piano-shutdown >/dev/null <<EOF
+#   $USER ALL=(root) NOPASSWD: /sbin/poweroff
+#   EOF
+#   sudo chmod 440 /etc/sudoers.d/piano-shutdown
+enabled = true
+hold_direction = "down"
+hold_seconds = 5.0
+
 [pedal]
 # Where the sustain pedal engages.
 #

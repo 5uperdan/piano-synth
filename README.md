@@ -60,6 +60,7 @@ Maximum 64.
 | Any input mid-animation | Cancels it immediately and starts the new one. |
 | Press joystick in | Loads the font under the cursor: three amber flashes, a steady amber pixel while it loads, two green flashes on success (red on failure). |
 | **Hold joystick in (1.5s)** | Saves everything in the recording buffer to a timestamped `.mid`. Whole matrix flashes amber to confirm the hold registered, then green on success or red on failure. Works with the display asleep, and does not wake it. |
+| **Hold joystick down (5s)** | Shuts the Pi down. The grid fills red as you hold; let go at any point and nothing happens. |
 | No input for 6 seconds | Display sleeps, so the next nudge is a wake again. |
 
 Because holding and tapping mean different things, the middle button acts when
@@ -695,6 +696,59 @@ have tests that run on any machine — no Pi, no Sense HAT, no MIDI hardware:
 ```bash
 uv run --with mido --with pytest pytest tests/ -q
 ```
+
+---
+
+# Shutting down
+
+Pulling the power on a running Pi risks corrupting the SD card, and reaching for
+SSH defeats the point of an appliance. So: **hold the joystick down.**
+
+The grid fills red one pixel at a time over five seconds. **Release at any point
+and nothing happens** — the display clears and you carry on. Only a completely
+full grid halts the machine, and the fill is its own confirmation prompt: you
+can start one out of curiosity and simply let go.
+
+The grid stays lit while systemd stops the services, so a red matrix means
+"going down". Wait for it to blank, give it a couple of seconds more, then cut
+the power.
+
+## It needs a sudoers rule
+
+Halting requires root, so grant exactly that one command and nothing else:
+
+```bash
+sudo tee /etc/sudoers.d/piano-shutdown >/dev/null <<EOF
+$USER ALL=(root) NOPASSWD: /sbin/poweroff
+EOF
+sudo chmod 440 /etc/sudoers.d/piano-shutdown
+```
+
+Without it the gesture still runs, but the grid flashes red three times at the
+end and the journal explains why:
+
+```
+ERROR Shutdown refused. Is /etc/sudoers.d/piano-shutdown installed?
+```
+
+## Configuring it
+
+```toml
+[shutdown]
+enabled = true
+hold_direction = "down"
+hold_seconds = 5.0
+```
+
+Set `enabled = false` to remove the gesture entirely. Lengthen `hold_seconds`
+if five seconds feels too easy, or change `hold_direction` — but avoid whichever
+direction `[wifi]` uses if you have that toggle enabled, since both are
+hold-a-direction gestures.
+
+**A known quirk:** pressing down also moves the cursor one row, because
+direction presses act immediately. Suppressing that would mean deferring every
+direction to release, which would make browsing feel laggy. The wifi toggle
+behaves the same way.
 
 ---
 
