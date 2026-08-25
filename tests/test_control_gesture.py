@@ -333,3 +333,34 @@ def test_progress_is_monotonic_and_bounded():
     assert app.shutdown_progress(2.5) == 32
     assert app.shutdown_progress(5.0) == 64
     assert app.shutdown_progress(60.0) == 64   # clamped, never overruns
+
+
+# -- shutdown signal handling ----------------------------------------------
+
+def test_sigterm_becomes_systemexit_so_cleanup_runs():
+    """systemd stops services with SIGTERM. Python's default disposition kills
+    the process outright, so `finally` never runs and the Sense HAT keeps
+    displaying whatever was last written -- indefinitely, since a halted Pi
+    still powers the HAT. This is what makes the display clear on shutdown."""
+    import os
+    import signal as signal_module
+
+    previous = signal_module.getsignal(signal_module.SIGTERM)
+    try:
+        piano_control.exit_on_sigterm()
+        with pytest.raises(SystemExit):
+            os.kill(os.getpid(), signal_module.SIGTERM)
+            time.sleep(0.2)          # give the handler a chance to run
+    finally:
+        signal_module.signal(signal_module.SIGTERM, previous)
+
+
+def test_the_handler_is_not_the_default():
+    import signal as signal_module
+
+    previous = signal_module.getsignal(signal_module.SIGTERM)
+    try:
+        piano_control.exit_on_sigterm()
+        assert signal_module.getsignal(signal_module.SIGTERM) is not signal_module.SIG_DFL
+    finally:
+        signal_module.signal(signal_module.SIGTERM, previous)

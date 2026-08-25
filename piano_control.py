@@ -29,6 +29,7 @@ import logging
 import os
 import re
 import select
+import signal
 import socket
 import subprocess
 import sys
@@ -472,6 +473,23 @@ def set_wifi(blocked: bool) -> bool:
     return True
 
 
+def exit_on_sigterm() -> None:
+    """Make systemd's stop signal run our cleanup instead of killing us dead.
+
+    systemd stops services with SIGTERM, whose default disposition in Python
+    terminates the process outright -- no exception is raised, so `finally`
+    blocks never run. That matters here because the Sense HAT's LED matrix is
+    driven by a microcontroller on the HAT that holds the last frame written to
+    it, and a halted Pi keeps its 5V rail energised. Without this, whatever was
+    on the display when the service stopped stays lit indefinitely after the
+    machine powers off -- which for the shutdown gesture means a full red grid,
+    forever, drawing current.
+
+    Turning SIGTERM into SystemExit lets the normal cleanup path clear it.
+    """
+    signal.signal(signal.SIGTERM, lambda _signum, _frame: sys.exit(0))
+
+
 def poweroff() -> bool:
     """Halt the machine. Needs a narrow NOPASSWD sudoers rule; see the README."""
     try:
@@ -741,9 +759,9 @@ class App:
         self.matrix.show_marks({i: self.config.colour_error for i in range(MATRIX_PIXELS)})
 
         if poweroff():
-            # Leave the matrix lit. systemd stops this service moments from
-            # now, and a full red grid is a clearer "going down" signal than a
-            # display that blanks and leaves you guessing.
+            # Leave the grid lit for now: systemd will stop this service within
+            # a second or two, and the cleanup path clears the matrix then.
+            # A display that blanks is the signal that the services are down.
             return
 
         LOG.error("Shutdown refused. Is /etc/sudoers.d/piano-shutdown installed?")
@@ -898,11 +916,14 @@ def main() -> int:
         LOG.info("MIDI capture disabled; hold-to-save will do nothing")
 
     app = App(config, sense, fluid, capture)
+    exit_on_sigterm()
     try:
         app.run()
     except KeyboardInterrupt:
         pass
     finally:
+        # Stop any animation thread first, or it could redraw over the clear.
+        app.matrix.cancel()
         sense.clear()
     return 0
 

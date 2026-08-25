@@ -750,9 +750,23 @@ and nothing happens** — the display clears and you carry on. Only a completely
 full grid halts the machine, and the fill is its own confirmation prompt: you
 can start one out of curiosity and simply let go.
 
-The grid stays lit while systemd stops the services, so a red matrix means
-"going down". Wait for it to blank, give it a couple of seconds more, then cut
-the power.
+The grid stays lit for the second or two systemd takes to stop the services,
+then blanks. **A blank display is the signal that the services are down.** Give
+it a couple of seconds more for the card to sync, then cut the power. The Pi's
+own green ACT LED flashes ten times at the very end of shutdown if you want the
+definitive answer.
+
+> **Why the display clears at all.** The Sense HAT's LED matrix is driven by a
+> microcontroller on the HAT that holds the last frame written to it, and a
+> halted Pi keeps its 5V rail energised. So the matrix does not go dark by
+> itself — whatever was on it when the service stopped stays lit indefinitely,
+> drawing current, on a machine that looks switched off.
+>
+> `piano_control.py` handles SIGTERM for exactly this reason. systemd stops
+> services with SIGTERM, and Python's default disposition terminates the
+> process outright without running `finally` blocks. Turning it into
+> `SystemExit` lets the cleanup path clear the matrix. A hard power cut still
+> leaves it lit — nothing can prevent that.
 
 ## It needs a sudoers rule
 
