@@ -16,6 +16,7 @@ Power it on, wait a few seconds, play. Nothing to log into.
 ```
 piano-synth/
 ├── README.md                        this file
+├── LICENSE                          MIT
 ├── config.toml                      all tunable settings
 ├── pyproject.toml                   uv project definition
 ├── piano_control.py                 the Sense HAT application
@@ -606,6 +607,46 @@ ls -l ~/recordings
 
 Finally, `sudo reboot` and confirm it all comes back on its own. Nothing to log
 into from here — power on and play.
+
+---
+
+# Configuration
+
+Everything tunable lives in `config.toml`, and **every setting is documented
+inline there** — that's deliberate, since it's the file you edit and comments
+next to a value can't drift away from it. This is the map:
+
+| Section | Controls | Detail |
+|---|---|---|
+| `[paths]` | Where soundfonts and saved state live. Uses `~`, so nothing depends on your username. | [step 9](#9-configure) |
+| `[fluidsynth]` | Connection to the audio engine, load timeout, and `load_before_unload` ordering. | [step 9](#9-configure) |
+| `[display]` | LED rotation, brightness, idle timeout, scroll speed. | below |
+| `[colours]` | The palette. **Scrolling text must be a single channel** — see below. | below |
+| `[shutdown]` | Hold-to-power-off gesture. | [Shutting down](#shutting-down) |
+| `[pedal]` | Where the sustain pedal engages. | [The sustain pedal](#the-sustain-pedal) |
+| `[capture]` | Rolling MIDI recording, buffer size, retention. | [MIDI recording](#midi-recording) |
+| `[wifi]` | Optional hold-to-disable-WiFi toggle, off by default. | [Is the WiFi toggle worth it?](#is-the-wifi-toggle-worth-it) |
+
+After changing anything: `sudo systemctl restart piano-control`. Only
+`[fluidsynth]` settings baked into the *service file* need FluidSynth itself
+restarted.
+
+## A note on colours
+
+Each Sense HAT pixel is one package containing three separate dies. A white or
+mixed colour lights all three, so every pixel of a glyph renders as three
+distinct coloured points side by side — which smears the edges of a 3x5
+character and makes soundfont names genuinely hard to read. `low_light = true`
+makes it worse, because the dies separate out more at low brightness.
+
+**Keep `text` to a single channel** — `[0, n, 0]`, `[n, 0, 0]` or `[0, 0, n]`.
+One channel lights one die: a single clean point. Green reads best, sitting at
+the eye's peak sensitivity; red is a good alternative; blue is worst, because
+the eye focuses short wavelengths poorly and the edges look soft however crisp
+the LED is.
+
+This only matters for `text`. The other colours are single pixels or
+whole-matrix flashes, where die separation is invisible.
 
 ---
 
