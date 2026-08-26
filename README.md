@@ -18,6 +18,7 @@ piano-synth/
 ├── README.md                        this file
 ├── LICENSE                          MIT
 ├── config.toml                      all tunable settings
+├── audio.env.example                template for your sound card name
 ├── pyproject.toml                   uv project definition
 ├── piano_control.py                 the Sense HAT application
 ├── midi_capture.py                  the rolling MIDI recorder
@@ -219,9 +220,20 @@ hw:CARD=Device,DEV=0
     USB Audio Device, USB Audio
 ```
 
-**Write down the exact `hw:CARD=...` string** — it goes into the service file
-in step 11. Use the `hw:` form, not `plughw:` or `default:`: `hw:` is direct
-hardware access with no resampling layer in the way.
+Use the **`hw:`** form, not `plughw:` or `default:` — `hw:` is direct hardware
+access with no resampling layer in the way.
+
+**Record it now**, in `audio.env`:
+
+```bash
+cd ~/piano-synth
+cp audio.env.example audio.env
+nano audio.env          # set ALSA_DEVICE to your string
+```
+
+This is the only setting that differs between machines, which is why it lives
+in a gitignored file rather than in the tracked service unit. Keeping the unit
+identical everywhere means `git pull` never collides with a local edit.
 
 **Check:** it makes noise.
 
@@ -531,14 +543,13 @@ were playing.
 
 ## 11. Install the services
 
-First put your sound card string from step 4 into the FluidSynth unit:
+Check `audio.env` exists from step 4 — the FluidSynth unit reads the card name
+from it and will refuse to start without it:
 
 ```bash
 cd /home/$USER/piano-synth
-nano systemd/fluidsynth.service
+cat audio.env
 ```
-
-Replace `hw:CARD=Device,DEV=0` on the `audio.alsa.device` line.
 
 The unit files carry a literal `$USER` placeholder, because systemd does no
 variable expansion of its own. Substitute it as you install them:
@@ -569,14 +580,9 @@ sudo systemctl enable --now piano-control.service
 
 ### Updating later
 
-Editing the sound card into `systemd/fluidsynth.service` leaves that file
-permanently modified in your working tree, so `git status` will always show it.
-That's expected — the card name is specific to your machine.
-
-`git pull` still works: git only refuses when incoming changes touch a file
-you've modified locally. If a future change does touch that file you'll get a
-conflict, and keeping your own `audio.alsa.device` line is the right
-resolution.
+Nothing tracked needs editing per machine, so `git status` should be clean and
+`git pull` should never conflict. If it does, something has been changed by
+hand that ought to live in `audio.env` or `config.toml` instead.
 
 After pulling anything that changes the Python or the units:
 

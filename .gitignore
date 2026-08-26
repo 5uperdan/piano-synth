@@ -6,6 +6,9 @@ __pycache__/
 .venv/
 uv.lock
 
+# Machine-specific sound card, from audio.env.example
+audio.env
+
 # Runtime data
 soundfonts/*
 !soundfonts/.gitkeep

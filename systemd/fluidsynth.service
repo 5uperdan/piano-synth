@@ -22,11 +22,18 @@ IOSchedulingPriority=2
 # kind of stall that causes an audible dropout.
 MemorySwapMax=0
 
-# NOTE: replace hw:CARD=Device,DEV=0 with the name `aplay -L` reports for the
-# Sound Blaster on your Pi. See README step 4.
+# The sound card name is the one thing here that differs between machines, so
+# it lives outside this file. Create audio.env from audio.env.example (it is
+# gitignored) and this unit stays identical everywhere, which means pulling an
+# update never conflicts with a local edit. See README step 4.
+#
+# A missing audio.env fails the unit with a clear message, which is better than
+# silently starting on the wrong device.
+EnvironmentFile=/home/$USER/piano-synth/audio.env
+
 ExecStart=/usr/bin/fluidsynth -is \
   -a alsa \
-  -o audio.alsa.device=hw:CARD=Device,DEV=0 \
+  -o audio.alsa.device=${ALSA_DEVICE} \
   -o audio.period-size=128 \
   -o audio.periods=2 \
   -o audio.realtime-prio=90 \
