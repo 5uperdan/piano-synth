@@ -292,10 +292,23 @@ systemd services do not read `limits.conf`. You need both.
 The Pi clocks down when idle and takes a moment to ramp up, which can show up
 as dropouts on the first notes after a pause.
 
-**This step is optional — try without it first.** On a Pi 4 running only this
-project, measured load sits around 0.08 and no underruns appear at
-`period-size=128` with the governor left on `ondemand`. Only reach for it if
-you actually hear a dropout on the first note after a silence.
+**Do this one.** An earlier version of this README called it optional, on the
+grounds that idle load sits around 0.08 and nothing crackles during ordinary
+playing. That was measured too gently: dense chords with the sustain pedal down
+crackle audibly on `ondemand`, and instrumenting it showed exactly why.
+
+Sampling FluidSynth's CPU and the core clocks four times a second during dense
+playing, **27 samples caught it working at 24–40% of a core while all four
+cores sat at 600–700 MHz.** The load is bursty and spread across three render
+threads, so per-core utilisation looks like ~10% and `ondemand` never crosses
+its ramp-up threshold. At 600 MHz you have a third of the compute per period —
+a chord that renders in 1ms at full clock needs 3ms, against a 2.67ms deadline.
+That miss is the crackle.
+
+With the governor pinned, the same measurement gave **zero** samples below
+1000 MHz and zero busy-and-downclocked moments, and peak usage fell from 39.7%
+to 35.9% because identical work occupies less core-time at three times the
+clock. Temperature rose only 46°C to 48°C.
 
 > **`cpufrequtils` does not exist on Trixie** (`apt-cache policy` reports no
 > candidate). Older versions of this README told you to install it; that
