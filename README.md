@@ -765,8 +765,11 @@ definitive answer.
 > `piano_control.py` handles SIGTERM for exactly this reason. systemd stops
 > services with SIGTERM, and Python's default disposition terminates the
 > process outright without running `finally` blocks. Turning it into
-> `SystemExit` lets the cleanup path clear the matrix. A hard power cut still
-> leaves it lit — nothing can prevent that.
+> `SystemExit` lets the cleanup path clear the matrix.
+>
+> Pulling the plug clears it too, obviously — no power, no LEDs. The case
+> nothing can fix is a kernel panic or a hang: the board stays energised but
+> nothing is running to clear the display, so the last frame simply stays there.
 
 ## It needs a sudoers rule
 

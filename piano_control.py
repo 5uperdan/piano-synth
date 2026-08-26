@@ -482,8 +482,9 @@ def exit_on_sigterm() -> None:
     driven by a microcontroller on the HAT that holds the last frame written to
     it, and a halted Pi keeps its 5V rail energised. Without this, whatever was
     on the display when the service stopped stays lit indefinitely after the
-    machine powers off -- which for the shutdown gesture means a full red grid,
-    forever, drawing current.
+    machine halts -- which for the shutdown gesture means a full red grid, still
+    drawing current, on something that looks switched off. (Unplugging clears
+    it; halting does not, because the 5V rail stays up.)
 
     Turning SIGTERM into SystemExit lets the normal cleanup path clear it.
     """
