@@ -584,13 +584,29 @@ Nothing tracked needs editing per machine, so `git status` should be clean and
 `git pull` should never conflict. If it does, something has been changed by
 hand that ought to live in `audio.env` or `config.toml` instead.
 
-After pulling anything that changes the Python or the units:
+After pulling anything that changes the Python:
 
 ```bash
-sudo cp systemd/*.service /etc/systemd/system/   # only if a unit changed
-sudo systemctl daemon-reload
 sudo systemctl restart piano-control piano-capture
 ```
+
+If a **unit file** changed, reinstall it the same way as step 11 — **never with
+a plain `cp`.** The tracked units contain a literal `$USER` that systemd does
+not expand, so copying one verbatim installs a service that tries to run as a
+user called `$USER` and fails with `Failed to spawn 'start' task: No such file
+or directory`:
+
+```bash
+cd ~/piano-synth
+for unit in systemd/*.service; do
+  sed "s|[$]USER|$USER|g" "$unit" | sudo tee /etc/systemd/system/"$(basename "$unit")" >/dev/null
+done
+sudo systemctl daemon-reload
+sudo systemctl restart fluidsynth
+```
+
+`fluidsynth` only needs restarting if you changed *its* unit — leaving it alone
+means audio keeps playing across an update of the front end.
 
 `fluidsynth` only needs restarting if you changed its unit — leaving it alone
 means audio keeps playing across an update of the front end.
@@ -1107,6 +1123,13 @@ sounding.
 In order: confirm `ulimit -r` is 90; confirm the performance governor is
 active; raise `period-size` to 256; check `journalctl -u fluidsynth` for
 underrun messages.
+
+**A service fails with "Failed to spawn 'start' task: No such file or
+directory", or "Failed to load environment files".**
+The unit was installed without substituting `$USER` — almost always a plain
+`cp` instead of the `sed` loop. Check with
+`grep User= /etc/systemd/system/piano-control.service`; if it literally says
+`$USER`, reinstall via the loop in [Updating later](#updating-later).
 
 **Sense HAT shows nothing.**
 `systemctl status piano-control`. If it's restarting in a loop,
