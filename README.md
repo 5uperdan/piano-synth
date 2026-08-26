@@ -823,6 +823,56 @@ behaves the same way.
 
 ---
 
+# Levels
+
+Set the volume at the **sound card**, not at FluidSynth. Getting this backwards
+is audible.
+
+FluidSynth applies `-g` to the *summed* output of every sounding voice. A gain
+that sounds fine on a single note overflows full scale once ten notes are
+ringing with the pedal down — and overflow is hard clipping, which sounds like
+crackle. It costs no CPU, produces no underrun, and appears only on dense
+passages, so it is easy to mistake for a performance problem.
+
+Measured on a Pi 4 with a Yamaha Grand soundfont, against a deliberate worst
+case of four ten-note chords with the sustain pedal held:
+
+| `-g` | peak sample | headroom | clipped samples |
+|---|---|---|---|
+| 0.2 | 15360 | +6.6 dB | 0 |
+| **0.3** | 24535 | **+2.5 dB** | **0** |
+| 0.4 | 32714 | 0.0 dB | 1 |
+| 0.5 | 32768 | — | 42 |
+| 1.0 | 32768 | — | 6,131 |
+| 2.0 | 32768 | — | 37,945 |
+
+Earlier versions of this project shipped `-g 2.0`, which clips roughly forty
+thousand samples in a ten-second passage. It now ships **`-g 0.3`**, which
+leaves 2.5 dB spare on material harder than anyone actually plays.
+
+**Make up the loudness at the card**, where attenuation costs nothing:
+
+```bash
+amixer -c S3 sset Speaker 100%      # substitute your own card name
+sudo alsactl store                  # or it reverts at next boot
+```
+
+A USB card often ships heavily attenuated — this one defaulted to −20 dB,
+which is precisely why someone reached for `-g 2.0` in the first place. Unity
+at the card plus a conservative synth gain gives the same loudness with the
+headroom intact.
+
+Check what yours is doing:
+
+```bash
+amixer -c S3 sget Speaker
+```
+
+If you need more level still, take it from your amplifier. There is no
+advantage to raising `-g` and a very audible cost.
+
+---
+
 # The sustain pedal
 
 If sustain feels like it needs a deeper press through the Pi than it does
@@ -1036,9 +1086,16 @@ Substitute your own card string. If it stays up for the full 8 seconds with no
 errors, the configuration is sound and the problem is in the unit file.
 
 **Sound works but is very quiet.**
-Raise `-g 2.0` in the service file (up to about 5.0 before clipping) and check
-the card's own mixer with `alsamixer -c 0` — press F5 to see capture and
-playback controls, and make sure nothing is muted.
+**Do not raise `-g`.** Turn up the card's mixer instead — `alsamixer -c S3`,
+or `amixer -c S3 sset Speaker 100%`. See [Levels](#levels) for why that order
+matters. Also check nothing is muted (F5 in alsamixer shows capture and
+playback controls).
+
+**Crackling only when you play a lot of notes at once.**
+That is clipping, not a dropout. Voices sum before `-g` is applied, so a gain
+that is fine for one note overflows on a ten-note chord. See
+[Levels](#levels). Dropouts, by contrast, do not care how many notes are
+sounding.
 
 **Crackling or dropouts.**
 In order: confirm `ulimit -r` is 90; confirm the performance governor is

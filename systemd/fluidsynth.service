@@ -36,7 +36,7 @@ ExecStart=/usr/bin/fluidsynth -is \
   -m alsa_seq \
   -o midi.autoconnect=1 \
   -o shell.port=9800 \
-  -g 2.0 \
+  -g 0.3 \
   -C 0 \
   -R 1
 
