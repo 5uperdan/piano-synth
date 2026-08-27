@@ -22,15 +22,19 @@ piano-synth/
 ├── pyproject.toml                   uv project definition
 ├── piano_control.py                 the Sense HAT application
 ├── midi_capture.py                  the rolling MIDI recorder
+├── cpu_boost.py                     holds the clock up while you play
+├── midi_source.py                   the MIDI tap both of those share
 ├── font3x5.py                       pixel font for scrolling text
 ├── tests/                           run these on any machine, no Pi needed
 └── systemd/
     ├── fluidsynth.service           the audio engine
     ├── piano-control.service        the Sense HAT front end
-    └── piano-capture.service        the MIDI recorder
+    ├── piano-capture.service        the MIDI recorder
+    ├── piano-boost.service          the CPU governor watcher
+    └── cpu-performance.service      a switch that sets the governor
 ```
 
-Three services, deliberately kept apart:
+Four services, deliberately kept apart:
 
 - **fluidsynth** owns the audio and never needs to restart.
 - **piano-control** drives the Sense HAT and talks to FluidSynth over a local
@@ -38,6 +42,12 @@ Three services, deliberately kept apart:
 - **piano-capture** records MIDI. It subscribes to the same ALSA sequencer port
   FluidSynth listens to, *in parallel* rather than in line, so it sits beside
   the audio path rather than inside it.
+- **piano-boost** watches the same port for activity and raises the CPU
+  governor while you are playing. See [CPU speed](#cpu-speed).
+
+Plus **cpu-performance**, which is not a daemon but a switch: starting it sets
+the governor, stopping it puts it back. It is the only unit that runs as root,
+and the only place that touches `scaling_governor`.
 
 That last point is the whole reason recording is safe to leave on. The kernel
 delivers each MIDI event to both subscribers independently: if capture stalls,
@@ -299,7 +309,7 @@ systemd services do not read `limits.conf`. You need both.
 
 ---
 
-## 7. CPU frequency and swap
+## 7. CPU speed and swap
 
 The Pi clocks down when idle and takes a moment to ramp up, which can show up
 as dropouts on the first notes after a pause.
@@ -326,28 +336,28 @@ clock. Temperature rose only 46°C to 48°C.
 > candidate). Older versions of this README told you to install it; that
 > instruction fails on Debian 13.
 
-If you do need it, a small unit avoids depending on any package:
+`cpu-performance.service` ships with this project and needs no package. You
+have two ways to use it, installed in step 11 either way:
+
+- **On demand (default).** Leave it disabled and let `piano-boost` start and
+  stop it. Full clock while you play, `ondemand` when you have not touched the
+  piano for three minutes. Needs the sudoers rule below.
+- **Always.** `sudo systemctl enable --now cpu-performance.service` and set
+  `boost_enabled = false` under `[performance]`. Simplest, and about 4 °C and a
+  watt or two warmer at idle.
+
+For the on-demand option, grant permission for exactly those two commands:
 
 ```bash
-sudo tee /etc/systemd/system/cpu-performance.service >/dev/null <<'EOF'
-[Unit]
-Description=Pin CPU governor to performance for low-latency audio
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/bin/sh -c 'for c in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo performance > "$c"; done'
-
-[Install]
-WantedBy=multi-user.target
+sudo tee /etc/sudoers.d/piano-boost >/dev/null <<EOF
+$USER ALL=(root) NOPASSWD: /usr/bin/systemctl start cpu-performance.service, /usr/bin/systemctl stop cpu-performance.service
 EOF
-sudo systemctl enable --now cpu-performance.service
+sudo chmod 440 /etc/sudoers.d/piano-boost
 ```
 
-**Check:** `cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor` prints
-`performance`. This raises idle power and temperature slightly — acceptable for
-an always-on appliance, and part of why the stacking header in step 1 is worth
-having.
+**Check:** play a note, then
+`cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor` — it should say
+`performance`, and revert to `ondemand` three minutes after you stop.
 
 ### Then check what kind of swap you have
 
@@ -576,7 +586,11 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now fluidsynth.service
 sudo systemctl enable --now piano-capture.service
 sudo systemctl enable --now piano-control.service
+sudo systemctl enable --now piano-boost.service
 ```
+
+Do **not** enable `cpu-performance.service` — `piano-boost` starts and stops
+it. Enable it only if you chose the "always" option in step 7.
 
 ### Updating later
 
@@ -616,10 +630,10 @@ means audio keeps playing across an update of the front end.
 ## 12. Verify
 
 ```bash
-systemctl status fluidsynth piano-capture piano-control
+systemctl status fluidsynth piano-capture piano-control piano-boost
 ```
 
-All three should be `active (running)`. Then watch the control app start up:
+All four should be `active (running)`. Then watch the control app start up:
 
 ```bash
 journalctl -u piano-control -f
@@ -660,6 +674,8 @@ next to a value can't drift away from it. This is the map:
 | `[shutdown]` | Hold-to-power-off gesture. | [Shutting down](#shutting-down) |
 | `[pedal]` | Where the sustain pedal engages. | [The sustain pedal](#the-sustain-pedal) |
 | `[capture]` | Rolling MIDI recording, buffer size, retention. | [MIDI recording](#midi-recording) |
+| `[midi]` | Which MIDI port to listen on. Shared by every service. | [step 5](#5-confirm-midi-arrives) |
+| `[performance]` | Raising the CPU governor while you play. | [CPU speed](#cpu-speed) |
 | `[wifi]` | Optional hold-to-disable-WiFi toggle, off by default. | [Is the WiFi toggle worth it?](#is-the-wifi-toggle-worth-it) |
 
 After changing anything: `sudo systemctl restart piano-control`. Only
@@ -842,6 +858,61 @@ hold-a-direction gestures.
 direction presses act immediately. Suppressing that would mean deferring every
 direction to release, which would make browsing feel laggy. The wifi toggle
 behaves the same way.
+
+---
+
+# CPU speed
+
+FluidSynth's load is bursty and spread across three render threads, so per-core
+utilisation reads about 10% even during dense chords. `ondemand` never crosses
+its ramp-up threshold and leaves the cores at 600–700 MHz — a third of the
+compute per audio period. A chord that renders in 1 ms at full clock needs 3 ms
+against a 2.67 ms deadline, and misses it audibly.
+
+Pinning `performance` permanently fixes that, but holds 1800 MHz and 0.926 V
+around the clock on a machine that is idle almost all the time.
+
+**What no stock governor offers is hysteresis.** `ondemand` and `schedutil`
+both react to instantaneous load, so a quiet bar in the middle of a piece looks
+exactly like having gone to bed. `scaling_min_freq` does not distinguish them
+either — it just raises the floor permanently.
+
+`piano-boost` supplies the missing behaviour: **any note raises the governor,
+and it stays raised until you have genuinely stopped.**
+
+```toml
+[performance]
+boost_enabled = true
+idle_release_seconds = 180
+```
+
+## What it deliberately does not fix
+
+**The first note after a silence is still rendered at the low clock.** The
+boost is reacting to that note; nothing can anticipate it. That trade is the
+whole design: crackle on one note after minutes of quiet is tolerable in a way
+that crackle mid-phrase is not. If you would rather never hear it, take the
+"always" option in step 7 and accept the idle power.
+
+## How it is put together
+
+It subscribes to the MIDI port **in parallel** with FluidSynth and the
+recorder, sharing `midi_source.py` with the latter. The kernel delivers each
+event to every subscriber independently, so it costs the audio path nothing —
+measured, the whole of `piano-capture` uses 0.147% of one core, and this does
+less.
+
+It never writes `scaling_governor` itself. All root-level work lives in
+`cpu-performance.service`, and `piano-boost` is granted permission to start and
+stop that one unit and nothing else, so it cannot set the governor to anything
+that unit does not already do.
+
+The MIDI callback only stamps a time — `systemctl` takes around 100 ms and
+would stall rtmidi's delivery thread if it ran there.
+
+If the sudoers rule is missing it logs the failure and carries on. If the
+service dies while boosted, the governor stays raised: audio keeps working and
+you lose only the idle saving, which is the right direction to fail.
 
 ---
 
@@ -1131,6 +1202,12 @@ The unit was installed without substituting `$USER` — almost always a plain
 `grep User= /etc/systemd/system/piano-control.service`; if it literally says
 `$USER`, reinstall via the loop in [Updating later](#updating-later).
 
+**CPU governor never rises, or crackle on dense chords returns.**
+`journalctl -u piano-boost -n 20`. A missing sudoers rule shows as a
+`systemctl start` failure. Confirm with
+`cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor` while playing —
+it should read `performance`. See [CPU speed](#cpu-speed).
+
 **Sense HAT shows nothing.**
 `systemctl status piano-control`. If it's restarting in a loop,
 `journalctl -u piano-control -n 50` will say why — usually the venv can't
@@ -1193,8 +1270,8 @@ readable by `$USER`.
 # Talk to FluidSynth directly while it's running
 telnet 127.0.0.1 9800        # then: fonts, channels, gain 3, help
 
-# Watch all three services
-journalctl -u fluidsynth -u piano-control -u piano-capture -f
+# Watch all four services
+journalctl -u fluidsynth -u piano-control -u piano-capture -u piano-boost -f
 
 # Run the control app by hand (stop the service first)
 sudo systemctl stop piano-control

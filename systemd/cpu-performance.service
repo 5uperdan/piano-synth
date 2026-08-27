@@ -1,0 +1,26 @@
+[Unit]
+Description=Pin CPU governor to performance for low-latency audio
+
+# A switch, not a program. Starting it writes `performance` to every core's
+# scaling_governor and exits; RemainAfterExit keeps systemd remembering that,
+# so the unit reports active with no process running and can be stopped again.
+#
+# This is the only place in the project that touches scaling_governor. Nothing
+# else needs root: piano-boost is granted permission to start and stop this
+# unit and nothing more, so it cannot set the governor to anything this file
+# does not already do.
+#
+# Not enabled at boot when piano-boost is in use -- the boost service starts
+# and stops it on demand. Enable it if you would rather pin the clock always.
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'for c in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo performance > "$c"; done'
+
+# Without this, stopping the unit would mark it inactive while leaving the
+# cores pinned -- a switch that only turns on.
+ExecStop=/bin/sh -c 'for c in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo ondemand > "$c"; done'
+
+[Install]
+WantedBy=multi-user.target

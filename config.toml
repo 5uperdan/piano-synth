@@ -89,6 +89,40 @@ hold_seconds = 5.0
 # above the threshold is full sustain.
 sustain_threshold = 56
 
+[midi]
+# Substring of the ALSA MIDI input port name, as shown by `aconnect -l`.
+# "Midi Through" is always skipped -- it is a virtual loopback, not your piano.
+# Shared by every service that listens to the piano.
+port_match = "MIDI"
+
+[performance]
+# Hold the CPU at full clock while you are playing.
+#
+# FluidSynth's load is bursty and spread across three render threads, so
+# per-core utilisation reads about 10% even during dense chords and `ondemand`
+# never ramps -- leaving the cores at 600MHz, a third of the compute per audio
+# period, which crackles. Pinning `performance` permanently fixes that but
+# holds 1800MHz around the clock on a machine that is idle almost all the time.
+#
+# What no stock governor offers is hysteresis: a quiet bar mid-piece looks
+# exactly like having stopped. So any note raises the governor and it stays
+# raised until genuinely idle.
+#
+# The first note after a silence is still rendered at the low clock -- the
+# boost is reacting to that note. That is the deliberate trade: crackle on one
+# note after minutes of quiet is tolerable; crackle mid-phrase is not.
+#
+# Requires a narrow sudoers rule, or it logs why and does nothing:
+#   sudo tee /etc/sudoers.d/piano-boost >/dev/null <<EOF
+#   $USER ALL=(root) NOPASSWD: /usr/bin/systemctl start cpu-performance.service, /usr/bin/systemctl stop cpu-performance.service
+#   EOF
+#   sudo chmod 440 /etc/sudoers.d/piano-boost
+#
+# Set false to leave the governor alone entirely -- then either live with
+# `ondemand`, or enable cpu-performance.service at boot to pin it always.
+boost_enabled = true
+idle_release_seconds = 180
+
 [capture]
 # Rolling MIDI recording. Everything you play is held in memory; nothing is
 # written to disk until you hold the joystick in. See the README.
@@ -108,9 +142,6 @@ max_events = 250000
 # the directory cannot quietly fill the SD card. Set to 0 to never delete.
 retention_days = 30
 
-# Substring of the ALSA MIDI input port name, as shown by `aconnect -l`.
-# "Midi Through" is always skipped -- it is a virtual loopback, not your piano.
-port_match = "MIDI"
 
 # How long to hold the joystick in before a save triggers. A shorter press
 # still loads the soundfont under the cursor as before.

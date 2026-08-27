@@ -1,0 +1,26 @@
+[Unit]
+Description=Raise the CPU governor while the piano is being played
+After=sound.target
+Wants=sound.target
+# Deliberately independent of fluidsynth and of piano-capture. It subscribes to
+# the MIDI port in parallel with both, so it neither needs them running nor is
+# affected when they are not.
+
+[Service]
+Type=simple
+User=$USER
+Group=$USER
+SupplementaryGroups=audio
+
+WorkingDirectory=/home/$USER/piano-synth
+Environment=PIANO_CONFIG=/home/$USER/piano-synth/config.toml
+ExecStart=/home/$USER/piano-synth/.venv/bin/python /home/$USER/piano-synth/cpu_boost.py
+
+# Well below FluidSynth's realtime audio thread, which it can never preempt.
+Nice=10
+
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

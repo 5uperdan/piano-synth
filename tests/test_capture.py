@@ -28,25 +28,6 @@ CLOCK = bytes([0xF8])
 ACTIVE_SENSING = bytes([0xFE])
 
 
-# -- filtering -------------------------------------------------------------
-
-@pytest.mark.parametrize("data", [NOTE_ON, NOTE_OFF, SUSTAIN_DOWN,
-                                 bytes([0xC0, 5]), bytes([0xE0, 0, 64])])
-def test_musical_messages_are_kept(data):
-    assert mc.is_musical(data)
-
-
-@pytest.mark.parametrize("data", [CLOCK, ACTIVE_SENSING, bytes([0xFA]),
-                                  bytes([0xF0, 0x7E]), b""])
-def test_system_messages_are_dropped(data):
-    assert not mc.is_musical(data)
-
-
-def test_sustain_pedal_survives_filtering():
-    """CC64 is the pedal. Dropping it would make every recording sound wrong."""
-    assert mc.is_musical(SUSTAIN_DOWN)
-
-
 # -- ring buffer -----------------------------------------------------------
 
 def test_buffer_drops_events_outside_the_time_window():
@@ -299,24 +280,3 @@ def test_unknown_commands_are_rejected(running_capture):
 def test_client_raises_when_capture_is_not_running(tmp_path):
     with pytest.raises(OSError):
         CaptureClient(tmp_path / "nothing.sock", timeout=1).save()
-
-
-# -- port selection --------------------------------------------------------
-
-def test_midi_through_is_never_chosen():
-    """ALSA's virtual loopback matches most substrings and carries no data."""
-    config = mc.CaptureConfig({"capture": {"port_match": "MIDI"}})
-    source = mc.MidiSource(mc.RingBuffer(60, 10), config)
-    assert source._choose_port(["Midi Through:0", "USB MIDI Interface:0"]) == 1
-
-
-def test_first_real_port_used_when_nothing_matches():
-    config = mc.CaptureConfig({"capture": {"port_match": "nonexistent"}})
-    source = mc.MidiSource(mc.RingBuffer(60, 10), config)
-    assert source._choose_port(["Midi Through:0", "Some Keyboard:0"]) == 1
-
-
-def test_no_port_when_only_loopback_present():
-    config = mc.CaptureConfig({"capture": {"port_match": "MIDI"}})
-    source = mc.MidiSource(mc.RingBuffer(60, 10), config)
-    assert source._choose_port(["Midi Through:0"]) is None

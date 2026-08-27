@@ -34,6 +34,8 @@ import tomllib
 from collections import deque
 from pathlib import Path
 
+from midi_source import MidiSource, is_musical  # noqa: F401  (re-exported)
+
 LOG = logging.getLogger("capture")
 
 # 480 ticks per beat at 120bpm puts a tick just under a millisecond, which is
@@ -43,21 +45,6 @@ TEMPO_US_PER_BEAT = 500_000
 TICKS_PER_SECOND = TICKS_PER_BEAT * 1_000_000 / TEMPO_US_PER_BEAT
 
 SECONDS_PER_DAY = 86_400
-
-# How often to check the MIDI adapter is still plugged in.
-PORT_POLL_SECONDS = 5.0
-
-# Channel voice messages only.  0xF0 and above is system realtime: clock,
-# active sensing, start/stop.  The P-95 emits a steady stream of those and
-# they carry no musical information, so they are dropped before they ever
-# reach the buffer rather than bloating it.
-STATUS_MIN = 0x80
-STATUS_MAX = 0xEF
-
-
-def is_musical(data: bytes) -> bool:
-    return bool(data) and STATUS_MIN <= data[0] <= STATUS_MAX
-
 
 # --------------------------------------------------------------------------
 # Configuration
@@ -74,7 +61,7 @@ class CaptureConfig:
         self.window_minutes = float(capture.get("window_minutes", 60))
         self.max_events = int(capture.get("max_events", 250_000))
         self.retention_days = int(capture.get("retention_days", 30))
-        self.port_match = str(capture.get("port_match", "MIDI"))
+        self.port_match = str(data.get("midi", {}).get("port_match", "MIDI"))
 
     @property
     def window_seconds(self) -> float:
@@ -270,99 +257,6 @@ class ControlServer(socketserver.ThreadingUnixStreamServer):
 # MIDI input
 # --------------------------------------------------------------------------
 
-class MidiSource:
-    """Keeps an rtmidi input port open, reopening it if the adapter vanishes.
-
-    Worth having on a box you never log into: unplug the MIDI cable without
-    this and recording stops silently until someone restarts the service.
-    Detection is by polling the port list -- rtmidi's own `is_port_open` only
-    reports whether we called `open_port`, not whether the device is still
-    there.
-    """
-
-    def __init__(self, buffer: RingBuffer, config: CaptureConfig):
-        self.buffer = buffer
-        self.config = config
-        self._midi_in = None
-        self._port_name: str | None = None
-        self._stop = threading.Event()
-
-    def _choose_port(self, names: list[str]) -> int | None:
-        # "Midi Through" is ALSA's virtual loopback -- it matches most
-        # substrings people would configure and never carries piano data.
-        candidates = [
-            (index, name)
-            for index, name in enumerate(names)
-            if "through" not in name.lower()
-        ]
-        wanted = self.config.port_match.lower()
-        for index, name in candidates:
-            if wanted and wanted in name.lower():
-                return index
-        return candidates[0][0] if candidates else None
-
-    def _on_message(self, message, _data=None) -> None:
-        payload, _delta = message
-        data = bytes(payload)
-        if is_musical(data):
-            self.buffer.append(time.monotonic(), data)
-
-    def _list_ports(self) -> list[str]:
-        import rtmidi
-
-        probe = rtmidi.MidiIn()
-        try:
-            return probe.get_ports()
-        finally:
-            probe.delete()
-
-    def _open(self, names: list[str]) -> None:
-        import rtmidi
-
-        index = self._choose_port(names)
-        if index is None:
-            LOG.warning("No MIDI input port matching %r", self.config.port_match)
-            return
-
-        midi_in = rtmidi.MidiIn()
-        midi_in.open_port(index)
-        # rtmidi drops these by default and is_musical() would drop them
-        # anyway, but not queueing them at all is cheapest.
-        midi_in.ignore_types(sysex=True, timing=True, active_sense=True)
-        midi_in.set_callback(self._on_message)
-        self._midi_in = midi_in
-        self._port_name = names[index]
-        LOG.info("Listening on MIDI port %r", self._port_name)
-
-    def _close(self) -> None:
-        if self._midi_in is not None:
-            try:
-                self._midi_in.close_port()
-                self._midi_in.delete()
-            except Exception:  # noqa: BLE001
-                pass
-        self._midi_in = None
-        self._port_name = None
-
-    def run(self) -> None:
-        while not self._stop.is_set():
-            try:
-                names = self._list_ports()
-                if self._port_name is not None and self._port_name not in names:
-                    LOG.warning("MIDI port %r disappeared", self._port_name)
-                    self._close()
-                if self._midi_in is None:
-                    self._open(names)
-            except Exception as exc:  # noqa: BLE001 - never let this thread die
-                LOG.error("MIDI input error: %s", exc)
-                self._close()
-            self._stop.wait(PORT_POLL_SECONDS)
-
-    def stop(self) -> None:
-        self._stop.set()
-        self._close()
-
-
 # --------------------------------------------------------------------------
 
 def main() -> int:
@@ -385,7 +279,7 @@ def main() -> int:
     buffer = RingBuffer(config.window_seconds, config.max_events)
     recorder = Recorder(buffer, config)
 
-    source = MidiSource(buffer, config)
+    source = MidiSource(buffer.append, config.port_match)
     threading.Thread(target=source.run, name="midi-in", daemon=True).start()
 
     server = ControlServer(config.socket_path, recorder)
