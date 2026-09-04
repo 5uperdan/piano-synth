@@ -72,6 +72,8 @@ Maximum 64.
 | Any input mid-animation | Cancels it immediately and starts the new one. |
 | Press joystick in | Loads the font under the cursor: three amber flashes, a steady amber pixel while it loads, two green flashes on success (red on failure). |
 | **Hold joystick in (1.5s)** | Saves everything in the recording buffer to a timestamped `.mid`. Whole matrix flashes amber to confirm the hold registered, then green on success or red on failure. Works with the display asleep, and does not wake it. |
+| **Hold joystick down (2.5s)** | Powers off. The grid fills red as you hold; let go and nothing happens. See [Shutting down](#shutting-down). |
+| **Hold joystick up (2.5s)** | Switches between stereo and mono. The grid fills teal; let go and nothing changes. Either way `MONO` or `STEREO` scrolls afterwards. See [Mono and stereo](#mono-and-stereo). |
 | **Hold joystick down (5s)** | Shuts the Pi down. The grid fills red as you hold; let go at any point and nothing happens. |
 | No input for 6 seconds | Display sleeps, so the next nudge is a wake again. |
 
@@ -676,6 +678,7 @@ next to a value can't drift away from it. This is the map:
 | `[capture]` | Rolling MIDI recording, buffer size, retention. | [MIDI recording](#midi-recording) |
 | `[midi]` | Which MIDI port to listen on. Shared by every service. | [step 5](#5-confirm-midi-arrives) |
 | `[performance]` | Raising the CPU governor while you play. | [CPU speed](#cpu-speed) |
+| `[output]` | The mono/stereo toggle. | [Mono and stereo](#mono-and-stereo) |
 | `[wifi]` | Optional hold-to-disable-WiFi toggle, off by default. | [Is the WiFi toggle worth it?](#is-the-wifi-toggle-worth-it) |
 
 After changing anything: `sudo systemctl restart piano-control`. Only
@@ -796,7 +799,7 @@ uv run --with mido --with pytest pytest tests/ -q
 Pulling the power on a running Pi risks corrupting the SD card, and reaching for
 SSH defeats the point of an appliance. So: **hold the joystick down.**
 
-The grid fills red one pixel at a time over five seconds. **Release at any point
+The grid fills red one pixel at a time over 2.5 seconds. **Release at any point
 and nothing happens** — the display clears and you carry on. Only a completely
 full grid halts the machine, and the fill is its own confirmation prompt: you
 can start one out of curiosity and simply let go.
@@ -850,7 +853,7 @@ hold_seconds = 5.0
 ```
 
 Set `enabled = false` to remove the gesture entirely. Lengthen `hold_seconds`
-if five seconds feels too easy, or change `hold_direction` — but avoid whichever
+if 2.5 seconds feels too easy, or change `hold_direction` — but avoid whichever
 direction `[wifi]` uses if you have that toggle enabled, since both are
 hold-a-direction gestures.
 
@@ -963,6 +966,82 @@ amixer -c S3 sget Speaker
 
 If you need more level still, take it from your amplifier. There is no
 advantage to raising `-g` and a very audible cost.
+
+---
+
+# Mono and stereo
+
+Hold the joystick **up** for 2.5 seconds. The grid fills teal as you hold; let
+go at any point and nothing changes. Either way `MONO` or `STEREO` scrolls
+across afterwards — so an abandoned hold still tells you where you are.
+
+## Why it works the way it does
+
+**FluidSynth has no mono mode.** There is no setting and no shell command for
+it, and the stereo image does not come from anywhere you can reach: piano
+soundfonts are recorded as stereo *sample pairs*, with the two halves panned
+hard left and hard right by generators inside the file. Nothing downstream of
+the synth's mixer can collapse that, and CC10 only shifts the whole image
+rather than summing it.
+
+So mono is an **ALSA `route` device** that sums both channels at half gain,
+declared in `~/.asoundrc`:
+
+```
+pcm.piano_mono {
+    type route
+    slave.pcm "hw:CARD=S3,DEV=0"
+    slave.channels 2
+    ttable.0.0 0.5
+    ttable.0.1 0.5
+    ttable.1.0 0.5
+    ttable.1.1 0.5
+}
+```
+
+FluidSynth only reads its audio device at startup, so **switching restarts
+it** — which costs a soundfont reload, several seconds with a large font. That
+is the price of the synth not having a mono mode; there is no cheaper route
+that does not add a plugin host to the audio path.
+
+The choice is written to `~/.local/state/piano/output.env`, which systemd
+layers over `audio.env` as an optional second `EnvironmentFile`. Later files
+win, so its presence means mono and its absence means stereo — and the setting
+survives a reboot the way your chosen soundfont does.
+
+`MONO` or `STEREO` is scrolled **before** the restart is issued, because the
+restart may stop `piano-control` itself. The message has to be finished first.
+
+## Setting it up
+
+Generate the ALSA device from the card you already configured:
+
+```bash
+cd ~/piano-synth && . audio.env
+cat > ~/.asoundrc <<EOF
+pcm.piano_mono {
+    type route
+    slave.pcm "$ALSA_DEVICE"
+    slave.channels 2
+    ttable.0.0 0.5
+    ttable.0.1 0.5
+    ttable.1.0 0.5
+    ttable.1.1 0.5
+}
+EOF
+```
+
+Then allow the restart, narrowly:
+
+```bash
+sudo tee /etc/sudoers.d/piano-output >/dev/null <<EOF
+$USER ALL=(root) NOPASSWD: /usr/bin/systemctl restart fluidsynth.service
+EOF
+sudo chmod 440 /etc/sudoers.d/piano-output
+```
+
+Set `toggle_enabled = false` under `[output]` if you would rather not have the
+gesture at all.
 
 ---
 
@@ -1207,6 +1286,13 @@ The unit was installed without substituting `$USER` — almost always a plain
 `systemctl start` failure. Confirm with
 `cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor` while playing —
 it should read `performance`. See [CPU speed](#cpu-speed).
+
+**Mono/stereo toggle flashes red, or nothing happens.**
+`journalctl -u piano-control -n 20`. A missing sudoers rule shows as a failed
+`systemctl restart`. If the restart works but there is no sound in mono, the
+ALSA device is wrong — check `~/.asoundrc` defines `piano_mono` and that its
+`slave.pcm` matches `ALSA_DEVICE` in `audio.env`. Test it directly with
+`speaker-test -D piano_mono -c 2 -t sine -l 1` (stop FluidSynth first).
 
 **Sense HAT shows nothing.**
 `systemctl status piano-control`. If it's restarting in a loop,

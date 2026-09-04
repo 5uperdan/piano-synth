@@ -97,11 +97,21 @@ class Config:
         self.colour_busy = tuple(colours.get("busy", [140, 70, 0]))
         self.colour_wifi_on = tuple(colours.get("wifi_on", [0, 60, 160]))
         self.colour_wifi_off = tuple(colours.get("wifi_off", [90, 40, 0]))
+        self.colour_output = tuple(colours.get("output", [0, 90, 120]))
 
         wifi = data.get("wifi", {})
         self.wifi_toggle_enabled = bool(wifi.get("toggle_enabled", False))
         self.wifi_hold_seconds = float(wifi.get("hold_seconds", 2.0))
         self.wifi_hold_direction = wifi.get("hold_direction", "up")
+
+        output = data.get("output", {})
+        self.output_toggle_enabled = bool(output.get("toggle_enabled", True))
+        self.output_direction = output.get("hold_direction", "up")
+        self.output_hold_seconds = float(output.get("hold_seconds", 2.5))
+        self.output_state_file = Path(
+            output.get("state_file", "~/.local/state/piano/output.env")
+        ).expanduser()
+        self.mono_device = str(output.get("mono_device", "piano_mono"))
 
         shutdown = data.get("shutdown", {})
         self.shutdown_enabled = bool(shutdown.get("enabled", True))
@@ -491,6 +501,28 @@ def exit_on_sigterm() -> None:
     signal.signal(signal.SIGTERM, lambda _signum, _frame: sys.exit(0))
 
 
+def restart_fluidsynth() -> bool:
+    """Reload FluidSynth so it picks up a changed audio device.
+
+    Switching between the raw card and the mono mixdown means changing which
+    ALSA device FluidSynth opened, and that only happens at startup. Needs a
+    narrow NOPASSWD sudoers rule; see the README.
+    """
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", "/usr/bin/systemctl", "restart", "fluidsynth.service"],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        LOG.error("restarting fluidsynth failed: %s", exc)
+        return False
+    if result.returncode != 0:
+        LOG.error("restarting fluidsynth failed: %s",
+                  result.stderr.strip() or "no sudoers rule?")
+        return False
+    return True
+
+
 def poweroff() -> bool:
     """Halt the machine. Needs a narrow NOPASSWD sudoers rule; see the README."""
     try:
@@ -504,6 +536,21 @@ def poweroff() -> bool:
         LOG.error("poweroff failed: %s", result.stderr.strip())
         return False
     return True
+
+
+class HoldGesture:
+    """A direction held down that fills the grid before doing something.
+
+    The fill is the safety mechanism and the documentation at once: you can see
+    how committed you are, and letting go abandons it.
+    """
+
+    def __init__(self, direction, seconds, colour, on_complete, on_cancel=None):
+        self.direction = direction
+        self.seconds = seconds
+        self.colour = colour
+        self.on_complete = on_complete
+        self.on_cancel = on_cancel
 
 
 # --------------------------------------------------------------------------
@@ -533,11 +580,22 @@ class App:
         # redrawn when it actually changes.
         self._direction_held: str | None = None
         self._direction_pressed_at: float | None = None
-        self._shutdown_lit = 0
-        # Latched once the countdown completes: the main loop keeps running
-        # while the machine halts, and without this poweroff would be called
-        # on every pass.
-        self._shutdown_fired = False
+        self._hold_lit = 0
+        self._hold_gesture: HoldGesture | None = None
+        # Latched once a countdown completes: the main loop keeps running
+        # afterwards, and without this the action would fire on every pass.
+        self._hold_fired = False
+
+        self.holds: list[HoldGesture] = []
+        if config.shutdown_enabled:
+            self.holds.append(HoldGesture(
+                config.shutdown_direction, config.shutdown_hold_seconds,
+                config.colour_error, self.trigger_shutdown))
+        if config.output_toggle_enabled:
+            self.holds.append(HoldGesture(
+                config.output_direction, config.output_hold_seconds,
+                config.colour_output, self.toggle_output,
+                on_cancel=self.announce_current_output))
 
     # -- soundfont inventory ------------------------------------------------
 
@@ -708,15 +766,25 @@ class App:
             LOG.info("Saved recording %s", name)
             self.matrix.full_flash(self.config.colour_success, 2, 0.1, 0.08)
 
-    def shutdown_progress(self, held_for: float) -> int:
+    def hold_progress(self, gesture: HoldGesture, held_for: float) -> int:
         """How many of the 64 pixels a hold of `held_for` seconds has earned."""
-        if self.config.shutdown_hold_seconds <= 0:
+        if gesture.seconds <= 0:
             return MATRIX_PIXELS
-        fraction = held_for / self.config.shutdown_hold_seconds
+        fraction = held_for / gesture.seconds
         return max(0, min(MATRIX_PIXELS, int(fraction * MATRIX_PIXELS)))
 
-    def update_shutdown(self, now: float) -> None:
-        """Fill the grid while the shutdown direction is held; clear on release.
+    def active_hold(self) -> HoldGesture | None:
+        """The gesture matching whichever direction is currently held, if any."""
+        if self._direction_held is None or self._direction_pressed_at is None:
+            return None
+        direction = self.rotate(self._direction_held)
+        for gesture in self.holds:
+            if gesture.direction == direction:
+                return gesture
+        return None
+
+    def update_holds(self, now: float) -> None:
+        """Fill the grid while a gesture direction is held; abandon on release.
 
         Deliberately driven by elapsed time in the main loop rather than by
         "held" events, which arrive at the kernel's key-repeat rate -- too
@@ -724,36 +792,84 @@ class App:
         countdown immediately, which is the whole safety mechanism: you can
         start one out of curiosity and let go.
         """
-        if not self.config.shutdown_enabled:
-            return
+        gesture = self.active_hold()
 
-        holding = (
-            self._direction_pressed_at is not None
-            and self._direction_held is not None
-            and self.rotate(self._direction_held) == self.config.shutdown_direction
-        )
-        if not holding:
-            self._shutdown_fired = False
-            if self._shutdown_lit:
-                self._shutdown_lit = 0
+        if gesture is None:
+            abandoned, was_lit, fired = self._hold_gesture, self._hold_lit, self._hold_fired
+            self._hold_gesture, self._hold_lit, self._hold_fired = None, 0, False
+            if was_lit:
                 self.matrix.clear()
+                if not fired and abandoned is not None and abandoned.on_cancel:
+                    abandoned.on_cancel()
             return
 
-        lit = self.shutdown_progress(now - self._direction_pressed_at)
+        lit = self.hold_progress(gesture, now - self._direction_pressed_at)
         if lit == 0:
             return
 
-        if self._shutdown_lit == 0:
+        if self._hold_lit == 0:
             self.matrix.cancel()          # take the display off any animation
-        if lit != self._shutdown_lit:
-            self._shutdown_lit = lit
-            self.matrix.show_marks({i: self.config.colour_error for i in range(lit)})
+        self._hold_gesture = gesture
+        if lit != self._hold_lit:
+            self._hold_lit = lit
+            self.matrix.show_marks({i: gesture.colour for i in range(lit)})
         # Hold counts as activity, or the idle timeout would blank the countdown.
         self.last_input = now
 
-        if lit >= MATRIX_PIXELS and not self._shutdown_fired:
-            self._shutdown_fired = True
-            self.trigger_shutdown()
+        if lit >= MATRIX_PIXELS and not self._hold_fired:
+            self._hold_fired = True
+            gesture.on_complete()
+
+    # -- mono / stereo output ----------------------------------------------
+
+    def output_is_mono(self) -> bool:
+        """Mono is expressed as an override file systemd layers over audio.env."""
+        try:
+            return "ALSA_DEVICE=" in self.config.output_state_file.read_text()
+        except OSError:
+            return False
+
+    def announce_output(self, mono: bool) -> None:
+        """Scroll MONO or STEREO. Runs inline rather than on the animation
+        thread, because the caller may be about to restart FluidSynth and take
+        this process down with it -- the message has to be finished first."""
+        self.matrix.cancel()
+        self.matrix.scroll(threading.Event(), "MONO" if mono else "STEREO",
+                           self.config.colour_output)
+        self.matrix.clear()
+
+    def announce_current_output(self) -> None:
+        """Shown when a toggle is started and then abandoned, so letting go
+        still tells you where you are."""
+        self.announce_output(self.output_is_mono())
+
+    def toggle_output(self) -> None:
+        """Swap between the raw card and the ALSA mono mixdown.
+
+        FluidSynth only reads its audio device at startup, so this writes the
+        override and restarts it. That costs a soundfont reload, which is the
+        price of not having a mono mode in the synth itself.
+        """
+        mono = not self.output_is_mono()
+        path = self.config.output_state_file
+        try:
+            if mono:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(f"ALSA_DEVICE={self.config.mono_device}\n")
+            else:
+                path.unlink(missing_ok=True)
+        except OSError as exc:
+            LOG.error("Could not change output mode: %s", exc)
+            self.matrix.full_flash(self.config.colour_error, 2, 0.15, 0.1)
+            return
+
+        LOG.info("Output set to %s", "mono" if mono else "stereo")
+        # Say it before restarting: the restart may stop this service.
+        self.announce_output(mono)
+
+        if not restart_fluidsynth():
+            LOG.error("Is /etc/sudoers.d/piano-output installed?")
+            self.matrix.full_flash(self.config.colour_error, 3, 0.1, 0.1)
 
     def trigger_shutdown(self) -> None:
         LOG.warning("Shutdown requested from the joystick")
@@ -767,7 +883,7 @@ class App:
 
         LOG.error("Shutdown refused. Is /etc/sudoers.d/piano-shutdown installed?")
         self.matrix.full_flash(self.config.colour_error, 3, 0.1, 0.1)
-        self._shutdown_lit = 0
+        self._hold_lit = 0
         self._direction_pressed_at = None
 
     def handle_press(self, direction: str) -> None:
@@ -865,7 +981,7 @@ class App:
                 self.save_recording()
                 self.sense.stick.get_events()
 
-            self.update_shutdown(now)
+            self.update_holds(now)
 
             if self.awake and now - self.last_input > self.config.idle_timeout:
                 self.awake = False

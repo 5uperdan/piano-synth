@@ -93,7 +93,8 @@ def build(tmp_path):
     (fonts / "Alpha.sf2").write_bytes(b"x")
     (fonts / "Beta.sf2").write_bytes(b"x")
 
-    def _build(script, hold_seconds=0.1, shutdown_seconds=0.2, shutdown=True):
+    def _build(script, hold_seconds=0.1, shutdown_seconds=0.2, shutdown=True,
+               output_seconds=0.2, output=True):
         config = Config({
             "paths": {
                 "soundfont_dir": str(fonts),
@@ -109,6 +110,13 @@ def build(tmp_path):
                 "enabled": shutdown,
                 "hold_direction": "down",
                 "hold_seconds": shutdown_seconds,
+            },
+            "output": {
+                "toggle_enabled": output,
+                "hold_direction": "up",
+                "hold_seconds": output_seconds,
+                # Never the real one -- tests must not touch a home directory.
+                "state_file": str(tmp_path / "output.env"),
             },
         })
         sense = FakeSense(FakeStick(script))
@@ -300,11 +308,13 @@ def test_the_display_is_cleared_when_the_hold_is_abandoned(build, halted):
     assert sense.lit_counts[-1] == 0
 
 
-def test_other_directions_do_not_start_a_countdown(build, halted):
-    app, fluid, capture, sense = build([[event("up", "pressed")]])
+def test_directions_without_a_gesture_do_nothing(build, halted, restarts):
+    """left and right only move the cursor; only up and down are gestures."""
+    app, fluid, capture, sense = build([[event("right", "pressed")]])
     run(app)
 
     assert halted == []
+    assert restarts == []
     assert max(sense.lit_counts) < 64
 
 
@@ -326,13 +336,16 @@ def test_a_refused_shutdown_does_not_kill_the_app(build, monkeypatch):
 
 
 def test_progress_is_monotonic_and_bounded():
-    config = Config({"shutdown": {"hold_seconds": 5.0}})
-    app = App(config, FakeSense(FakeStick([])), FakeFluid(), FakeCapture())
+    from piano_control import HoldGesture
 
-    assert app.shutdown_progress(0.0) == 0
-    assert app.shutdown_progress(2.5) == 32
-    assert app.shutdown_progress(5.0) == 64
-    assert app.shutdown_progress(60.0) == 64   # clamped, never overruns
+    config = Config({})
+    app = App(config, FakeSense(FakeStick([])), FakeFluid(), FakeCapture())
+    gesture = HoldGesture("down", 5.0, (1, 2, 3), lambda: None)
+
+    assert app.hold_progress(gesture, 0.0) == 0
+    assert app.hold_progress(gesture, 2.5) == 32
+    assert app.hold_progress(gesture, 5.0) == 64
+    assert app.hold_progress(gesture, 60.0) == 64   # clamped, never overruns
 
 
 # -- shutdown signal handling ----------------------------------------------
@@ -364,3 +377,120 @@ def test_the_handler_is_not_the_default():
         assert signal_module.getsignal(signal_module.SIGTERM) is not signal_module.SIG_DFL
     finally:
         signal_module.signal(signal_module.SIGTERM, previous)
+
+
+# -- mono / stereo output toggle -------------------------------------------
+
+@pytest.fixture
+def restarts(monkeypatch):
+    """Records FluidSynth restarts instead of performing them."""
+    calls = []
+    monkeypatch.setattr(piano_control, "restart_fluidsynth",
+                        lambda: (calls.append(1), True)[1])
+    return calls
+
+
+def test_holding_up_switches_to_mono(build, restarts):
+    app, fluid, capture, sense = build([[event("up", "pressed")]])
+    assert app.output_is_mono() is False
+    run(app)
+
+    assert app.output_is_mono() is True
+    assert app.config.mono_device in app.config.output_state_file.read_text()
+    assert len(restarts) == 1
+
+
+def test_holding_up_again_switches_back_to_stereo(build, restarts):
+    app, fluid, capture, sense = build([[event("up", "pressed")]])
+    app.toggle_output()                       # now mono
+    assert app.output_is_mono() is True
+    restarts.clear()
+
+    app.toggle_output()                       # back to stereo
+
+    assert app.output_is_mono() is False
+    assert not app.config.output_state_file.exists()
+    assert len(restarts) == 1
+
+
+def test_releasing_early_does_not_switch(build, restarts):
+    app, fluid, capture, sense = build(
+        [[event("up", "pressed")], [], [], [event("up", "released")]],
+        shutdown_seconds=5.0, output_seconds=5.0)
+    run(app)
+
+    assert app.output_is_mono() is False
+    assert restarts == []
+
+
+def test_the_state_is_announced_before_the_restart(build, monkeypatch):
+    """The restart may stop this service, so the message must already be done."""
+    order = []
+    monkeypatch.setattr(piano_control, "restart_fluidsynth",
+                        lambda: (order.append("restart"), True)[1])
+    app, fluid, capture, sense = build([[event("up", "pressed")]])
+    monkeypatch.setattr(app, "announce_output", lambda mono: order.append("announce"))
+
+    run(app)
+
+    assert order == ["announce", "restart"]
+
+
+def test_an_abandoned_hold_still_reports_the_current_state(build, restarts):
+    """Letting go tells you where you are, rather than leaving you guessing."""
+    announced = []
+    app, fluid, capture, sense = build(
+        # Long enough not to complete, short enough that the fill starts.
+        [[event("up", "pressed")]] + [[]] * 12 + [[event("up", "released")]],
+        shutdown_seconds=5.0, output_seconds=1.0)
+    app.announce_output = lambda mono: announced.append(mono)
+
+    run(app)
+
+    assert announced == [False], "cancelling should have reported stereo"
+    assert restarts == []
+
+
+def test_a_failed_restart_does_not_kill_the_app(build, monkeypatch):
+    monkeypatch.setattr(piano_control, "restart_fluidsynth", lambda: False)
+    app, fluid, capture, sense = build([[event("up", "pressed")]])
+
+    run(app)                                   # StopLoop, not an exception
+
+    assert app.output_is_mono() is True         # state still recorded
+
+
+def test_disabling_the_toggle_makes_up_inert(build, restarts):
+    app, fluid, capture, sense = build([[event("up", "pressed")]], output=False)
+    run(app)
+
+    assert restarts == []
+    assert app.output_is_mono() is False
+
+
+# -- the two gestures stay distinct ----------------------------------------
+
+def test_down_still_shuts_down_and_does_not_touch_output(build, halted, restarts):
+    app, fluid, capture, sense = build([[event("down", "pressed")]])
+    run(app)
+
+    assert len(halted) == 1
+    assert restarts == []
+    assert app.output_is_mono() is False
+
+
+def test_up_does_not_shut_down(build, halted, restarts):
+    app, fluid, capture, sense = build([[event("up", "pressed")]])
+    run(app)
+
+    assert halted == []
+    assert len(restarts) == 1
+
+
+def test_the_two_gestures_use_different_colours(build):
+    app, fluid, capture, sense = build([])
+    by_direction = {g.direction: g.colour for g in app.holds}
+
+    assert by_direction["down"] != by_direction["up"]
+    assert by_direction["down"] == app.config.colour_error
+    assert by_direction["up"] == app.config.colour_output

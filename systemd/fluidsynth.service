@@ -31,6 +31,11 @@ MemorySwapMax=0
 # silently starting on the wrong device.
 EnvironmentFile=/home/$USER/piano-synth/audio.env
 
+# Optional override, written by the mono/stereo toggle. systemd applies
+# environment files in order, so if this one exists its ALSA_DEVICE wins. The
+# leading dash makes it optional: absent means stereo.
+EnvironmentFile=-/home/$USER/.local/state/piano/output.env
+
 ExecStart=/usr/bin/fluidsynth -is \
   -a alsa \
   -o audio.alsa.device=${ALSA_DEVICE} \

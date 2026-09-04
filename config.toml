@@ -45,6 +45,7 @@ error = [150, 0, 0]
 busy = [140, 70, 0]
 wifi_on = [0, 60, 160]
 wifi_off = [90, 40, 0]
+output = [0, 90, 120]
 
 [wifi]
 # Off by default. See the README before enabling: FluidSynth is light enough
@@ -52,7 +53,8 @@ wifi_off = [90, 40, 0]
 # session. WiFi is always re-enabled at startup, so a reboot recovers.
 toggle_enabled = false
 hold_seconds = 2.0
-hold_direction = "up"
+# Moved off "up", which now toggles mono/stereo.
+hold_direction = "left"
 
 [shutdown]
 # Powering off cleanly without SSH. Hold the joystick in `hold_direction` and
@@ -66,7 +68,32 @@ hold_direction = "up"
 #   sudo chmod 440 /etc/sudoers.d/piano-shutdown
 enabled = true
 hold_direction = "down"
-hold_seconds = 5.0
+hold_seconds = 2.5
+
+[output]
+# Hold the joystick up to switch between stereo and a mono mixdown. The grid
+# fills in `colours.output`; let go and nothing changes. Either way MONO or
+# STEREO scrolls afterwards, so an abandoned hold still tells you where you are.
+#
+# FluidSynth has no mono mode -- the stereo image comes from the soundfont's
+# stereo sample pairs, which nothing downstream of the synth can collapse. So
+# mono is an ALSA `route` device that sums both channels, and switching to it
+# means restarting FluidSynth, which costs a soundfont reload.
+#
+# `mono_device` must match the PCM name defined in ~/.asoundrc (see README).
+# The state file is layered over audio.env by systemd, so the choice survives
+# a reboot the way the chosen soundfont does.
+#
+# Requires a narrow sudoers rule, or it logs why and flashes red:
+#   sudo tee /etc/sudoers.d/piano-output >/dev/null <<EOF
+#   $USER ALL=(root) NOPASSWD: /usr/bin/systemctl restart fluidsynth.service
+#   EOF
+#   sudo chmod 440 /etc/sudoers.d/piano-output
+toggle_enabled = true
+hold_direction = "up"
+hold_seconds = 2.5
+mono_device = "piano_mono"
+state_file = "~/.local/state/piano/output.env"
 
 [pedal]
 # Where the sustain pedal engages.
